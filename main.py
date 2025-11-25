@@ -4,6 +4,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pdf2docx import Converter
+import traceback # Tambahkan import ini di paling atas
 
 app = FastAPI()
 
@@ -59,3 +60,32 @@ async def convert_pdf(background_tasks: BackgroundTasks, file: UploadFile = File
 @app.get("/")
 def root():
     return {"message": "PDF Converter API is Running on Render!"}
+
+    try:
+        # Simpan file PDF
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Proses Konversi
+        # UPDATE DISINI: Tambahkan settings custom untuk mematikan multiprocessing
+        cv = Converter(input_path)
+        
+        # cpu_count=1 dan multiprocess=False mencegah Render crash
+        cv.convert(output_path, start=0, end=None, multiprocess=False, cpu_count=1) 
+        cv.close()
+
+        background_tasks.add_task(cleanup_files, [input_path, output_path])
+
+        return FileResponse(
+            path=output_path, 
+            filename=output_filename,
+            media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+
+    except Exception as e:
+        # Tampilkan error lengkap di Log Render (Traceback)
+        print("!!! ERROR DETAIL !!!")
+        traceback.print_exc() 
+        
+        cleanup_files([input_path])
+        raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}")
