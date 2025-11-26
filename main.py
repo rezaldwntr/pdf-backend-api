@@ -102,7 +102,7 @@ async def convert_pdf_to_excel(file: UploadFile = File(...)):
             except: pass
 
 
-# === FITUR 3: PDF KE PPTX (VERSI EDITABLE) ===
+# === FITUR 3: PDF KE PPTX (VERSI LITE/CEPAT) ===
 @app.post("/convert/pdf-to-ppt")
 async def convert_pdf_to_ppt(file: UploadFile = File(...)):
     # 1. Validasi
@@ -121,68 +121,69 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         tmp_ppt_path = tmp_pdf_path.replace(".pdf", ".pptx")
         original_filename = os.path.splitext(file.filename)[0] + ".pptx"
 
-        # 3. Logic Konversi Editable (PyMuPDF -> PPTX)
+        # 3. Logic Konversi Cepat (Blocks instead of Spans)
         prs = Presentation()
         doc = fitz.open(tmp_pdf_path)
 
         for page in doc:
-            # A. Setup Slide Ukuran Sesuai Halaman PDF
-            # PDF menggunakan Point (pt), PPTX juga bisa menerima Pt
+            # A. Setup Slide
             rect = page.rect
-            width_pt = rect.width
-            height_pt = rect.height
+            width_pt, height_pt = rect.width, rect.height
             
-            # Tambah slide kosong
             blank_slide_layout = prs.slide_layouts[6] 
             slide = prs.slides.add_slide(blank_slide_layout)
-            
-            # Sesuaikan ukuran slide PPT dengan PDF
             prs.slide_width = Pt(width_pt)
             prs.slide_height = Pt(height_pt)
 
-            # B. Ekstrak Konten (Text & Images) per blok
-            # "dict" flag memberikan struktur lengkap (posisi, jenis, teks)
-            blocks = page.get_text("dict")["blocks"]
+            # B. EKSTRAKSI TEKS SUPER CEPAT (Metode Blocks)
+            # Mengambil text per blok area, bukan per huruf. Jauh lebih ringan.
+            text_blocks = page.get_text("blocks")
+            
+            for block in text_blocks:
+                # block format: (x0, y0, x1, y1, "teks", block_no, block_type)
+                x0, y0, x1, y1, text, block_no, block_type = block
+                
+                # Filter area yang terlalu kecil (biasanya sampah/noise)
+                w = x1 - x0
+                h = y1 - y0
+                if w < 5 or h < 5: 
+                    continue
 
-            for block in blocks:
-                # --- TYPE 0: TEXT BLOCK ---
-                if block["type"] == 0:
-                    bbox = block["bbox"] # Koordinat (x0, y0, x1, y1)
-                    x, y = bbox[0], bbox[1]
-                    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-                    # Gabungkan baris teks dalam satu blok
-                    text_content = ""
-                    for line in block["lines"]:
-                        for span in line["spans"]:
-                            text_content += span["text"] + " "
-                        text_content += "\n" # Enter antar baris
-
-                    # Buat Text Box di PPT (Editable!)
-                    if text_content.strip():
-                        txBox = slide.shapes.add_textbox(Pt(x), Pt(y), Pt(w), Pt(h))
+                # Buat Textbox Editable
+                try:
+                    # Bersihkan teks dari karakter aneh
+                    clean_text = text.encode('latin-1', 'ignore').decode('latin-1')
+                    if clean_text.strip():
+                        txBox = slide.shapes.add_textbox(Pt(x0), Pt(y0), Pt(w), Pt(h))
                         tf = txBox.text_frame
-                        tf.text = text_content
-                        # (Opsional: Kita bisa atur font size disini jika mau lebih detail, 
-                        # tapi default dulu agar stabil)
+                        tf.text = clean_text
+                        tf.word_wrap = True
+                except:
+                    pass
 
-                # --- TYPE 1: IMAGE BLOCK ---
-                elif block["type"] == 1:
-                    bbox = block["bbox"]
-                    x, y = bbox[0], bbox[1]
-                    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            # C. EKSTRAKSI GAMBAR (Basic)
+            # Kita ambil gambar yang terdeteksi sebagai image list
+            image_list = page.get_images(full=True)
+            for img_index, img in enumerate(image_list):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
                     
-                    image_bytes = block["image"]
-                    image_ext = block["ext"]
+                    # Trik: Cari posisi gambar (agak tricky di PDF)
+                    # Kita pakai rect page full dulu jika posisi sulit didapat
+                    # Atau kita skip posisi presisi demi kecepatan (Limitasi versi Lite)
                     
-                    # Simpan gambar ke memory stream (tanpa simpan ke disk agar cepat)
+                    # Di versi Lite, kita letakkan gambar di pojok kiri atas 
+                    # atau lewati jika terlalu membebani proses.
+                    # Untuk keamanan timeout, kita batasi gambar max 5 per slide
+                    if img_index > 5: break
+
                     image_stream = io.BytesIO(image_bytes)
-                    
-                    try:
-                        slide.shapes.add_picture(image_stream, Pt(x), Pt(y), width=Pt(w), height=Pt(h))
-                    except:
-                        # Skip jika format gambar tidak didukung PPT
-                        pass
+                    # Default width 2 inch agar tidak memenuhi layar jika koordinat salah
+                    slide.shapes.add_picture(image_stream, Pt(0), Pt(0), height=Pt(150))
+                except:
+                    pass
 
         # 4. Simpan PPT
         prs.save(tmp_ppt_path)
@@ -201,7 +202,6 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Gagal convert PPT: {str(e)}")
         
     finally:
-        # Cleanup
         if tmp_pdf_path and os.path.exists(tmp_pdf_path):
             try: os.remove(tmp_pdf_path)
             except: pass
