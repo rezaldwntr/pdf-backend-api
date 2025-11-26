@@ -5,12 +5,14 @@ import traceback
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
+import io
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pdf2docx import Converter
 from pptx import Presentation
 from pptx.util import Inches
+from pptx.util import Pt
 
 app = FastAPI()
 
@@ -99,7 +101,8 @@ async def convert_pdf_to_excel(file: UploadFile = File(...)):
             try: os.remove(tmp_pdf_path)
             except: pass
 
-# === FITUR 3: PDF KE PPTX (BARU) ===
+
+# === FITUR 3: PDF KE PPTX (VERSI EDITABLE) ===
 @app.post("/convert/pdf-to-ppt")
 async def convert_pdf_to_ppt(file: UploadFile = File(...)):
     # 1. Validasi
@@ -108,8 +111,7 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
 
     tmp_pdf_path = None
     tmp_ppt_path = None
-    created_images = [] # Untuk melacak gambar sementara
-
+    
     try:
         # 2. Simpan PDF Sementara
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
@@ -119,32 +121,74 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         tmp_ppt_path = tmp_pdf_path.replace(".pdf", ".pptx")
         original_filename = os.path.splitext(file.filename)[0] + ".pptx"
 
-        # 3. Logic Konversi (PDF -> Images -> Slides)
+        # 3. Logic Konversi Editable (PyMuPDF -> PPTX)
         prs = Presentation()
-        # Set ukuran slide standar 16:9
-        prs.slide_width = Inches(13.333)
-        prs.slide_height = Inches(7.5)
-        
         doc = fitz.open(tmp_pdf_path)
 
-        for page_num, page in enumerate(doc):
-            # A. Buat Slide Kosong
+        for page in doc:
+            # A. Setup Slide Ukuran Sesuai Halaman PDF
+            # PDF menggunakan Point (pt), PPTX juga bisa menerima Pt
+            rect = page.rect
+            width_pt = rect.width
+            height_pt = rect.height
+            
+            # Tambah slide kosong
             blank_slide_layout = prs.slide_layouts[6] 
             slide = prs.slides.add_slide(blank_slide_layout)
             
-            # B. Konversi Halaman PDF ke Gambar (High Quality 150 DPI)
-            pix = page.get_pixmap(dpi=150)
-            img_filename = f"{tmp_pdf_path}_page_{page_num}.png"
-            pix.save(img_filename)
-            created_images.append(img_filename) # Catat untuk dihapus nanti
-            
-            # C. Tempel Gambar ke Slide (Full Screen)
-            slide.shapes.add_picture(img_filename, 0, 0, width=prs.slide_width, height=prs.slide_height)
+            # Sesuaikan ukuran slide PPT dengan PDF
+            prs.slide_width = Pt(width_pt)
+            prs.slide_height = Pt(height_pt)
+
+            # B. Ekstrak Konten (Text & Images) per blok
+            # "dict" flag memberikan struktur lengkap (posisi, jenis, teks)
+            blocks = page.get_text("dict")["blocks"]
+
+            for block in blocks:
+                # --- TYPE 0: TEXT BLOCK ---
+                if block["type"] == 0:
+                    bbox = block["bbox"] # Koordinat (x0, y0, x1, y1)
+                    x, y = bbox[0], bbox[1]
+                    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+                    # Gabungkan baris teks dalam satu blok
+                    text_content = ""
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            text_content += span["text"] + " "
+                        text_content += "\n" # Enter antar baris
+
+                    # Buat Text Box di PPT (Editable!)
+                    if text_content.strip():
+                        txBox = slide.shapes.add_textbox(Pt(x), Pt(y), Pt(w), Pt(h))
+                        tf = txBox.text_frame
+                        tf.text = text_content
+                        # (Opsional: Kita bisa atur font size disini jika mau lebih detail, 
+                        # tapi default dulu agar stabil)
+
+                # --- TYPE 1: IMAGE BLOCK ---
+                elif block["type"] == 1:
+                    bbox = block["bbox"]
+                    x, y = bbox[0], bbox[1]
+                    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    
+                    image_bytes = block["image"]
+                    image_ext = block["ext"]
+                    
+                    # Simpan gambar ke memory stream (tanpa simpan ke disk agar cepat)
+                    image_stream = io.BytesIO(image_bytes)
+                    
+                    try:
+                        slide.shapes.add_picture(image_stream, Pt(x), Pt(y), width=Pt(w), height=Pt(h))
+                    except:
+                        # Skip jika format gambar tidak didukung PPT
+                        pass
 
         # 4. Simpan PPT
         prs.save(tmp_ppt_path)
+        doc.close()
 
-        # 5. Kirim File PPTX
+        # 5. Kirim File
         return FileResponse(
             path=tmp_ppt_path, 
             filename=original_filename,
@@ -161,8 +205,3 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         if tmp_pdf_path and os.path.exists(tmp_pdf_path):
             try: os.remove(tmp_pdf_path)
             except: pass
-        # Hapus semua gambar sementara
-        for img in created_images:
-            if os.path.exists(img):
-                try: os.remove(img)
-                except: pass
