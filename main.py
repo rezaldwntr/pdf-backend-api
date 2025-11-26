@@ -102,7 +102,7 @@ async def convert_pdf_to_excel(file: UploadFile = File(...)):
             except: pass
 
 
-# === FITUR 3: PDF KE PPTX (VERSI LITE/CEPAT) ===
+# === FITUR 3: PDF KE PPTX (VERSI GABUNG 1 SLIDE) ===
 @app.post("/convert/pdf-to-ppt")
 async def convert_pdf_to_ppt(file: UploadFile = File(...)):
     # 1. Validasi
@@ -121,68 +121,62 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         tmp_ppt_path = tmp_pdf_path.replace(".pdf", ".pptx")
         original_filename = os.path.splitext(file.filename)[0] + ".pptx"
 
-        # 3. Logic Konversi Cepat (Blocks instead of Spans)
+        # 3. Logic Konversi (Gabung Teks & Gambar)
         prs = Presentation()
+        # Set ukuran slide standar Widescreen (16:9)
+        prs.slide_width = Inches(13.33)
+        prs.slide_height = Inches(7.5)
+        
         doc = fitz.open(tmp_pdf_path)
 
-        for page in doc:
-            # A. Setup Slide
-            rect = page.rect
-            width_pt, height_pt = rect.width, rect.height
-            
+        for i, page in enumerate(doc):
+            # A. Buat Slide Baru (Kosong)
             blank_slide_layout = prs.slide_layouts[6] 
             slide = prs.slides.add_slide(blank_slide_layout)
-            prs.slide_width = Pt(width_pt)
-            prs.slide_height = Pt(height_pt)
-
-            # B. EKSTRAKSI TEKS SUPER CEPAT (Metode Blocks)
-            # Mengambil text per blok area, bukan per huruf. Jauh lebih ringan.
-            text_blocks = page.get_text("blocks")
             
-            for block in text_blocks:
-                # block format: (x0, y0, x1, y1, "teks", block_no, block_type)
-                x0, y0, x1, y1, text, block_no, block_type = block
-                
-                # Filter area yang terlalu kecil (biasanya sampah/noise)
-                w = x1 - x0
-                h = y1 - y0
-                if w < 5 or h < 5: 
-                    continue
+            # --- BAGIAN 1: TEKS (SISI KIRI) ---
+            # Ambil teks
+            text_content = page.get_text("text")
+            clean_text = text_content.encode('latin-1', 'ignore').decode('latin-1')
+            
+            # Buat area teks di sebelah KIRI (Lebar sekitar 60% slide)
+            # (left, top, width, height)
+            left_tx = Inches(0.5)
+            top_tx = Inches(0.5)
+            width_tx = Inches(7.5) 
+            height_tx = Inches(6.5)
+            
+            txBox = slide.shapes.add_textbox(left_tx, top_tx, width_tx, height_tx)
+            tf = txBox.text_frame
+            tf.word_wrap = True # Agar teks turun ke bawah jika mentok
+            tf.text = clean_text # Masukkan teks
 
-                # Buat Textbox Editable
-                try:
-                    # Bersihkan teks dari karakter aneh
-                    clean_text = text.encode('latin-1', 'ignore').decode('latin-1')
-                    if clean_text.strip():
-                        txBox = slide.shapes.add_textbox(Pt(x0), Pt(y0), Pt(w), Pt(h))
-                        tf = txBox.text_frame
-                        tf.text = clean_text
-                        tf.word_wrap = True
-                except:
-                    pass
-
-            # C. EKSTRAKSI GAMBAR (Basic)
-            # Kita ambil gambar yang terdeteksi sebagai image list
+            # --- BAGIAN 2: GAMBAR (SISI KANAN) ---
             image_list = page.get_images(full=True)
+            
+            # Posisi awal gambar di sebelah KANAN teks
+            current_top_img = Inches(0.5) 
+            left_img = Inches(8.5) # Mulai di inchi ke-8.5 (sebelah kanan teks)
+            
             for img_index, img in enumerate(image_list):
+                # Batasi maksimal 3 gambar per slide agar tidak "jatuh" ke bawah slide
+                if img_index > 2: break
+                
                 try:
                     xref = img[0]
                     base_image = doc.extract_image(xref)
                     image_bytes = base_image["image"]
-                    
-                    # Trik: Cari posisi gambar (agak tricky di PDF)
-                    # Kita pakai rect page full dulu jika posisi sulit didapat
-                    # Atau kita skip posisi presisi demi kecepatan (Limitasi versi Lite)
-                    
-                    # Di versi Lite, kita letakkan gambar di pojok kiri atas 
-                    # atau lewati jika terlalu membebani proses.
-                    # Untuk keamanan timeout, kita batasi gambar max 5 per slide
-                    if img_index > 5: break
-
                     image_stream = io.BytesIO(image_bytes)
-                    # Default width 2 inch agar tidak memenuhi layar jika koordinat salah
-                    slide.shapes.add_picture(image_stream, Pt(0), Pt(0), height=Pt(150))
-                except:
+                    
+                    # Tempel Gambar
+                    # PENTING: Kita hanya set WIDTH, biarkan HEIGHT otomatis (agar tidak gepeng)
+                    picture = slide.shapes.add_picture(image_stream, left_img, current_top_img, width=Inches(4))
+                    
+                    # Update posisi cursor ke bawah untuk gambar berikutnya
+                    current_top_img += picture.height + Inches(0.2) 
+                    
+                except Exception as img_err:
+                    print(f"Skip image error: {img_err}")
                     pass
 
         # 4. Simpan PPT
