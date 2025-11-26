@@ -102,7 +102,7 @@ async def convert_pdf_to_excel(file: UploadFile = File(...)):
             except: pass
 
 
-# === FITUR 3: PDF KE PPTX (VERSI GABUNG 1 SLIDE) ===
+# === FITUR 3: PDF KE PPTX (VERSI STABIL / GAMBAR FULL) ===
 @app.post("/convert/pdf-to-ppt")
 async def convert_pdf_to_ppt(file: UploadFile = File(...)):
     # 1. Validasi
@@ -111,7 +111,8 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
 
     tmp_pdf_path = None
     tmp_ppt_path = None
-    
+    created_images = [] # List untuk melacak gambar sementara agar bisa dihapus
+
     try:
         # 2. Simpan PDF Sementara
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
@@ -121,63 +122,34 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         tmp_ppt_path = tmp_pdf_path.replace(".pdf", ".pptx")
         original_filename = os.path.splitext(file.filename)[0] + ".pptx"
 
-        # 3. Logic Konversi (Gabung Teks & Gambar)
+        # 3. Logic Konversi (PDF -> Image -> Slide)
         prs = Presentation()
-        # Set ukuran slide standar Widescreen (16:9)
-        prs.slide_width = Inches(13.33)
+        # Set ukuran slide ke Widescreen (16:9) agar modern
+        prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
         
         doc = fitz.open(tmp_pdf_path)
 
         for i, page in enumerate(doc):
-            # A. Buat Slide Baru (Kosong)
+            # A. Buat Slide Kosong
             blank_slide_layout = prs.slide_layouts[6] 
             slide = prs.slides.add_slide(blank_slide_layout)
             
-            # --- BAGIAN 1: TEKS (SISI KIRI) ---
-            # Ambil teks
-            text_content = page.get_text("text")
-            clean_text = text_content.encode('latin-1', 'ignore').decode('latin-1')
+            # B. Ubah Halaman PDF jadi Gambar (DPI 150 agar tidak terlalu berat tapi tetap tajam)
+            pix = page.get_pixmap(dpi=150)
+            img_filename = f"{tmp_pdf_path}_slide_{i}.png"
+            pix.save(img_filename)
+            created_images.append(img_filename)
             
-            # Buat area teks di sebelah KIRI (Lebar sekitar 60% slide)
-            # (left, top, width, height)
-            left_tx = Inches(0.5)
-            top_tx = Inches(0.5)
-            width_tx = Inches(7.5) 
-            height_tx = Inches(6.5)
-            
-            txBox = slide.shapes.add_textbox(left_tx, top_tx, width_tx, height_tx)
-            tf = txBox.text_frame
-            tf.word_wrap = True # Agar teks turun ke bawah jika mentok
-            tf.text = clean_text # Masukkan teks
-
-            # --- BAGIAN 2: GAMBAR (SISI KANAN) ---
-            image_list = page.get_images(full=True)
-            
-            # Posisi awal gambar di sebelah KANAN teks
-            current_top_img = Inches(0.5) 
-            left_img = Inches(8.5) # Mulai di inchi ke-8.5 (sebelah kanan teks)
-            
-            for img_index, img in enumerate(image_list):
-                # Batasi maksimal 3 gambar per slide agar tidak "jatuh" ke bawah slide
-                if img_index > 2: break
-                
-                try:
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image_stream = io.BytesIO(image_bytes)
-                    
-                    # Tempel Gambar
-                    # PENTING: Kita hanya set WIDTH, biarkan HEIGHT otomatis (agar tidak gepeng)
-                    picture = slide.shapes.add_picture(image_stream, left_img, current_top_img, width=Inches(4))
-                    
-                    # Update posisi cursor ke bawah untuk gambar berikutnya
-                    current_top_img += picture.height + Inches(0.2) 
-                    
-                except Exception as img_err:
-                    print(f"Skip image error: {img_err}")
-                    pass
+            # C. Tempel Gambar Full Screen di Slide
+            # left=0, top=0, width=full slide width, height=full slide height
+            slide.shapes.add_picture(
+                img_filename, 
+                0, 
+                0, 
+                width=prs.slide_width, 
+                height=prs.slide_height
+            )
 
         # 4. Simpan PPT
         prs.save(tmp_ppt_path)
@@ -196,6 +168,13 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Gagal convert PPT: {str(e)}")
         
     finally:
+        # Cleanup PDF
         if tmp_pdf_path and os.path.exists(tmp_pdf_path):
             try: os.remove(tmp_pdf_path)
             except: pass
+            
+        # Cleanup Gambar-gambar sementara (PENTING AGAR SERVER TIDAK PENUH)
+        for img_path in created_images:
+            if os.path.exists(img_path):
+                try: os.remove(img_path)
+                except: pass
