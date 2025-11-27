@@ -178,3 +178,78 @@ async def convert_pdf_to_ppt(file: UploadFile = File(...)):
             if os.path.exists(img_path):
                 try: os.remove(img_path)
                 except: pass
+
+# === FITUR 4: PDF KE GAMBAR (JPG, JPEG, PNG Only) ===
+@app.post("/convert/pdf-to-image")
+async def convert_pdf_to_image(
+    output_format: str = "png", # Default PNG
+    file: UploadFile = File(...)
+):
+    # 1. Validasi Format (GIF DIHAPUS)
+    fmt = output_format.lower() 
+    # Hanya izinkan 3 format ini
+    allowed_formats = ["jpg", "jpeg", "png"]
+    
+    if fmt not in allowed_formats:
+        # Error 400: Bad Request (Salah Format)
+        raise HTTPException(status_code=400, detail="Format tidak didukung. Pilih: jpg, jpeg, atau png.")
+        
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File harus format PDF")
+
+    # Setup Folder Sementara
+    tmp_dir = tempfile.mkdtemp() 
+    tmp_pdf_path = os.path.join(tmp_dir, file.filename)
+    
+    # Nama ZIP output
+    zip_filename = os.path.splitext(file.filename)[0] + f"_images_{fmt}.zip"
+    tmp_zip_path = os.path.join(tmp_dir, zip_filename)
+    
+    images_folder = os.path.join(tmp_dir, "processed_images")
+    os.makedirs(images_folder, exist_ok=True)
+
+    try:
+        # 2. Simpan PDF
+        with open(tmp_pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        doc = fitz.open(tmp_pdf_path)
+
+        # Logic Alpha Channel (Transparansi)
+        # JPG/JPEG tidak support transparan, jadi harus False
+        use_alpha = False if fmt in ["jpg", "jpeg"] else True
+
+        # 3. Loop Convert
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap(dpi=150, alpha=use_alpha)
+            
+            page_number = str(i + 1).zfill(3) 
+            img_name = f"page_{page_number}.{fmt}"
+            img_path = os.path.join(images_folder, img_name)
+            
+            pix.save(img_path)
+
+        doc.close()
+
+        # 4. ZIP Semua Gambar
+        with zipfile.ZipFile(tmp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(images_folder):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    zipf.write(file_path, arcname=file)
+
+        # 5. Kirim File ZIP
+        return FileResponse(
+            path=tmp_zip_path, 
+            filename=zip_filename,
+            media_type='application/zip'
+        )
+
+    except Exception as e:
+        print("!!! ERROR PDF TO IMAGE !!!")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Gagal convert Image: {str(e)}")
+        
+    finally:
+        try: shutil.rmtree(tmp_dir)
+        except: pass
