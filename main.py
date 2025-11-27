@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import traceback
+import zipfile
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
