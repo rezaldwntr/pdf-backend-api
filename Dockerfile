@@ -1,13 +1,14 @@
 # Gunakan image Python yang ringan
 FROM python:3.9-slim
 
-# --- BAGIAN YANG DIPERBAIKI ---
-# Di Linux versi baru, 'libgl1-mesa-glx' diganti menjadi 'libgl1'
+# --- UPDATE DEPENDENCY ---
+# Kita tambahkan 'poppler-utils' di sini agar error pdf2image hilang
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
-# -----------------------------
+# -------------------------
 
 WORKDIR /app
 
