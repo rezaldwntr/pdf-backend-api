@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 1.1 (Refactored)
+Versi: 1.2 (PikePDF Fix)
 """
 import os
 import shutil
@@ -22,12 +22,13 @@ import camelot.io as camelot
 from pdf2image import convert_from_path
 from pptx import Presentation
 from pptx.util import Inches
+import pikepdf  # <-- Dependensi baru untuk perbaikan PDF
 
 # Inisialisasi Aplikasi
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="1.1",
+    version="1.2",
 )
 
 # Konfigurasi logging terpusat
@@ -39,33 +40,40 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def read_root():
     return {"message": "Server Konverter PDF sedang berjalan."}
 
-# === FITUR 1: PDF KE DOCX ===
+# === FITUR 1: PDF KE DOCX (DENGAN PERBAIKAN) ===
 @app.post("/convert/pdf-to-docx")
 def convert_pdf_to_docx(file: UploadFile = File(...)):
     """
     Mengonversi file PDF menjadi Dokumen (DOCX).
-    Menggunakan `pdf2docx`.
+    Menggunakan `pdf2docx` dengan pra-proses perbaikan oleh `pikepdf`.
     """
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File harus format PDF")
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # Path untuk PDF dan DOCX sementara di dalam direktori temporer
-            tmp_pdf_path = os.path.join(tmp_dir, file.filename)
+            # Path sementara di dalam direktori temporer
+            original_pdf_path = os.path.join(tmp_dir, file.filename)
+            repaired_pdf_path = os.path.join(tmp_dir, "repaired.pdf") # Path untuk PDF yang sudah bersih
             output_filename = os.path.splitext(file.filename)[0] + ".docx"
             tmp_docx_path = os.path.join(tmp_dir, output_filename)
 
             # 1. Simpan file PDF yang diupload
-            with open(tmp_pdf_path, "wb") as f:
+            with open(original_pdf_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
-            # 2. Proses Konversi
-            cv = cv_docx(tmp_pdf_path)
+            # 2. [PERBAIKAN] Bersihkan/Perbaiki PDF menggunakan pikepdf
+            logging.info(f"Memperbaiki PDF: {file.filename}")
+            with pikepdf.open(original_pdf_path) as pdf:
+                pdf.save(repaired_pdf_path)
+            logging.info("Perbaikan PDF selesai.")
+
+            # 3. Proses Konversi menggunakan PDF yang sudah diperbaiki
+            cv = cv_docx(repaired_pdf_path) # <-- Gunakan PDF yang bersih
             cv.convert(tmp_docx_path, start=0, end=None)
             cv.close()
 
-            # 3. Kembalikan file hasil konversi
+            # 4. Kembalikan file hasil konversi
             return FileResponse(
                 path=tmp_docx_path,
                 filename=output_filename,
@@ -73,11 +81,15 @@ def convert_pdf_to_docx(file: UploadFile = File(...)):
             )
     except Exception as e:
         logging.error(f"Gagal saat konversi PDF ke DOCX: {e}", exc_info=True)
+        # Memberikan detail error spesifik jika dari pikepdf
+        if isinstance(e, pikepdf.PdfError):
+            raise HTTPException(status_code=422, detail=f"Gagal memproses PDF. File mungkin rusak atau tidak valid: {e}")
         raise HTTPException(status_code=500, detail=f"Terjadi kesalahan internal: {e}")
     finally:
         # Pastikan file stream ditutup
         if file:
             file.file.close()
+
 
 # === FITUR 2: PDF KE EXCEL ===
 @app.post("/convert/pdf-to-excel")
@@ -100,7 +112,6 @@ def convert_pdf_to_excel(file: UploadFile = File(...)):
                 shutil.copyfileobj(file.file, f)
 
             # 2. Proses Ekstraksi Tabel
-            # 'stream' adalah metode yang baik untuk tabel dengan garis yang tidak jelas
             tables = camelot.read_pdf(tmp_pdf_path, flavor='stream', pages='all')
 
             if tables.n == 0:
@@ -109,8 +120,6 @@ def convert_pdf_to_excel(file: UploadFile = File(...)):
             # 3. Simpan ke Excel
             tables.export(tmp_excel_path, f='excel', compress=False)
             
-            # Camelot menambahkan '-page-1-table-1', kita rename agar lebih bersih
-            # Temukan file excel yang sebenarnya dibuat oleh camelot
             actual_file_path = ""
             for item in os.listdir(tmp_dir):
                 if item.endswith(".xlsx"):
@@ -139,7 +148,6 @@ def convert_pdf_to_excel(file: UploadFile = File(...)):
 def convert_pdf_to_ppt(file: UploadFile = File(...)):
     """
     Mengonversi setiap halaman PDF menjadi slide di PowerPoint (PPTX).
-    Setiap halaman akan menjadi gambar di dalam slide.
     """
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File harus format PDF")
@@ -154,29 +162,25 @@ def convert_pdf_to_ppt(file: UploadFile = File(...)):
             with open(tmp_pdf_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
-            # 2. Konversi PDF ke list of images (objek PIL)
+            # 2. Konversi PDF ke list of images
             images = convert_from_path(tmp_pdf_path, output_folder=tmp_dir, fmt="png")
 
             # 3. Buat presentasi PowerPoint
             prs = Presentation()
             
-            # Ambil dimensi halaman pertama untuk mengatur slide
+            if not images:
+                raise ValueError("Tidak ada halaman yang dapat dikonversi dari PDF.")
+
             first_page = images[0]
-            slide_width = Inches(first_page.width / 96) # Asumsi 96 DPI
-            slide_height = Inches(first_page.height / 96)
-            prs.slide_width = int(slide_width * 914400) # Konversi ke EMU
-            prs.slide_height = int(slide_height * 914400)
+            prs.slide_width = Inches(first_page.width / 96)
+            prs.slide_height = Inches(first_page.height / 96)
 
             for i, image_obj in enumerate(images):
-                # Path untuk setiap gambar halaman
                 image_path = os.path.join(tmp_dir, f"page_{i}.png")
                 image_obj.save(image_path, "PNG")
 
-                # Tambahkan slide baru
-                blank_slide_layout = prs.slide_layouts[6] # Layout kosong
+                blank_slide_layout = prs.slide_layouts[6]
                 slide = prs.slides.add_slide(blank_slide_layout)
-
-                # Tambahkan gambar ke slide, penuhi slide
                 slide.shapes.add_picture(image_path, 0, 0, width=prs.slide_width, height=prs.slide_height)
             
             # 4. Simpan file PPTX
@@ -199,19 +203,14 @@ def convert_pdf_to_ppt(file: UploadFile = File(...)):
 @app.post("/convert/pdf-to-image")
 def convert_pdf_to_image(
     output_format: str = "png",
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
     """
-    Mengonversi PDF menjadi file gambar.
-    Jika PDF memiliki >1 halaman, hasilnya akan berupa file ZIP.
-    Format yang didukung: png, jpg, jpeg.
+    Mengonversi PDF menjadi file gambar. ZIP jika >1 halaman.
     """
-    # 1. Validasi
     fmt = output_format.lower()
-    allowed_formats = ["jpg", "jpeg", "png"]
-    if fmt not in allowed_formats:
+    if fmt not in ["jpg", "jpeg", "png"]:
         raise HTTPException(status_code=400, detail="Format tidak didukung. Pilih: jpg, jpeg, atau png.")
-        
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File harus format PDF")
 
@@ -219,11 +218,11 @@ def convert_pdf_to_image(
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_pdf_path = os.path.join(tmp_dir, file.filename)
 
-            # 2. Simpan PDF
+            # 1. Simpan PDF
             with open(tmp_pdf_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
-            # 3. Konversi PDF ke gambar
+            # 2. Konversi PDF ke gambar
             images = convert_from_path(tmp_pdf_path, output_folder=tmp_dir, fmt=fmt)
             
             image_paths = []
@@ -233,17 +232,11 @@ def convert_pdf_to_image(
                 image_obj.save(img_path, fmt.upper())
                 image_paths.append(img_path)
 
-            # 4. Tentukan output: file tunggal atau ZIP
+            # 3. Tentukan output: file tunggal atau ZIP
             if len(image_paths) == 1:
-                # Jika hanya 1 halaman, kirim sebagai file gambar
                 output_filename = os.path.splitext(file.filename)[0] + f".{fmt}"
-                return FileResponse(
-                    path=image_paths[0],
-                    filename=output_filename,
-                    media_type=f"image/{fmt}"
-                )
+                return FileResponse(path=image_paths[0], filename=output_filename, media_type=f"image/{fmt}")
             else:
-                # Jika >1 halaman, buat file ZIP
                 zip_filename = os.path.splitext(file.filename)[0] + ".zip"
                 zip_path = os.path.join(tmp_dir, zip_filename)
                 
@@ -251,11 +244,7 @@ def convert_pdf_to_image(
                     for img_path in image_paths:
                         zipf.write(img_path, os.path.basename(img_path))
                 
-                return FileResponse(
-                    path=zip_path,
-                    filename=zip_filename,
-                    media_type="application/zip"
-                )
+                return FileResponse(path=zip_path, filename=zip_filename, media_type="application/zip")
     except Exception as e:
         logging.error(f"Gagal saat konversi PDF ke Gambar: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Terjadi kesalahan internal: {e}")

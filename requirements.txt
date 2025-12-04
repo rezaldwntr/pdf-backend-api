@@ -4,6 +4,7 @@ python-multipart
 pdf2docx
 camelot-py[cv]
 pdf2image
+pikepdf
 opencv-python-headless
 numpy<2.0.0
 pymupdf<1.24.0
