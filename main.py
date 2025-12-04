@@ -12,6 +12,7 @@ from zipfile import ZipFile
 
 # Framework
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import BackgroundTasks
 from fastapi.responses import FileResponse
 
 # Library Konversi
@@ -29,6 +30,13 @@ app = FastAPI(
     version="2.0",
 )
 
+# Helper untuk hapus folder (jika belum ada)
+def cleanup_folder(path: str):
+    try:
+        if os.path.exists(path):
+            shutil.rmtree(path)
+    except: pass
+
 # Konfigurasi logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -38,81 +46,48 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def read_root():
     return {"message": "Server Konverter PDF sedang berjalan."}
 
-# === FITUR 1: PDF KE DOCX (METODE BERBASIS GAMBAR) ===
+# === UPDATE FITUR PDF KE DOCX ===
 @app.post("/convert/pdf-to-docx")
-def convert_pdf_to_docx(file: UploadFile = File(...)):
-    """
-    Mengonversi PDF menjadi Dokumen (DOCX) dengan menyematkan setiap halaman sebagai gambar.
-    Metode ini menjamin keberhasilan konversi untuk semua jenis PDF.
-    """
+async def convert_pdf_to_docx(
+    background_tasks: BackgroundTasks,  # <--- Tambah ini
+    file: UploadFile = File(...)
+):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File harus format PDF")
 
+    # Gunakan folder temp unik agar aman
+    tmp_dir = tempfile.mkdtemp()
+    tmp_pdf_path = os.path.join(tmp_dir, file.filename)
+    
+    # Nama output docx
+    docx_filename = os.path.splitext(file.filename)[0] + ".docx"
+    tmp_docx_path = os.path.join(tmp_dir, docx_filename)
+
     try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_pdf_path = os.path.join(tmp_dir, file.filename)
-            output_filename = os.path.splitext(file.filename)[0] + ".docx"
-            tmp_docx_path = os.path.join(tmp_dir, output_filename)
+        # Simpan PDF
+        with open(tmp_pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-            # 1. Simpan PDF yang diunggah
-            with open(tmp_pdf_path, "wb") as f:
-                shutil.copyfileobj(file.file, f)
+        # Proses Konversi
+        cv = Converter(tmp_pdf_path)
+        cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False, cpu_count=1)
+        cv.close()
 
-            # 2. Konversi PDF menjadi daftar gambar (kualitas tinggi)
-            logging.info(f"Mengonversi PDF ke gambar untuk DOCX: {file.filename}")
-            images = convert_from_path(tmp_pdf_path, dpi=200, output_folder=tmp_dir, fmt="png")
+        # Jadwalkan Hapus Folder SETELAH file terkirim
+        background_tasks.add_task(cleanup_folder, tmp_dir)
 
-            if not images:
-                raise ValueError("Tidak ada halaman yang dapat dikonversi dari PDF.")
-
-            # 3. Buat dokumen Word dan masukkan gambar
-            document = Document()
-            for i, image_path in enumerate(sorted(os.listdir(tmp_dir))):
-                if image_path.endswith('.png'):
-                    image_full_path = os.path.join(tmp_dir, image_path)
-                    
-                    # Atur orientasi halaman dan margin
-                    section = document.sections[-1]
-                    if images[i].width > images[i].height:
-                        section.orient = 1 # Landscape
-                        section.page_width = DocxInches(11)
-                        section.page_height = DocxInches(8.5)
-                    else:
-                        section.orient = 0 # Portrait
-                        section.page_width = DocxInches(8.5)
-                        section.page_height = DocxInches(11)
-
-                    section.left_margin = DocxInches(0.5)
-                    section.right_margin = DocxInches(0.5)
-                    section.top_margin = DocxInches(0.5)
-                    section.bottom_margin = DocxInches(0.5)
-
-                    # Tambahkan gambar, sesuaikan dengan ukuran halaman
-                    document.add_picture(
-                        image_full_path, 
-                        width=section.page_width - section.left_margin - section.right_margin
-                    )
-                    # Tambahkan page break jika bukan halaman terakhir
-                    if i < len(images) - 1:
-                        document.add_page_break()
-            
-            # 4. Simpan file DOCX
-            document.save(tmp_docx_path)
-            logging.info("Konversi PDF ke DOCX berbasis gambar berhasil.")
-
-            # 5. Kembalikan file hasil konversi
-            return FileResponse(
-                path=tmp_docx_path,
-                filename=output_filename,
-                media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-            )
+        # Kirim File
+        return FileResponse(
+            path=tmp_docx_path,
+            filename=docx_filename,
+            media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
 
     except Exception as e:
-        logging.error(f"Gagal saat konversi PDF ke DOCX berbasis gambar: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Terjadi kesalahan internal: {e}")
-    finally:
-        if file:
-            file.file.close()
+        cleanup_folder(tmp_dir) # Hapus jika error
+        print("!!! ERROR PDF TO DOCX !!!")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
 # ... (endpoint lainnya tetap sama) ...
 

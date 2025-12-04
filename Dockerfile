@@ -1,14 +1,14 @@
 # Gunakan image Python yang ringan
 FROM python:3.9-slim
 
-# --- UPDATE DEPENDENCY ---
-# Kita tambahkan 'poppler-utils' di sini agar error pdf2image hilang
+# --- BAGIAN PENTING: Install Poppler ---
+# Tambahkan 'poppler-utils' agar pdf2image bisa jalan
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
-# -------------------------
+# ---------------------------------------
 
 WORKDIR /app
 
