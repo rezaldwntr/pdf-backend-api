@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Library Konversi
-from pdf2docx import Converter  # <--- INI KUNCINYA (Membuat Word bisa diedit)
+from pdf2docx import Converter
 import fitz  # PyMuPDF
 from pptx import Presentation
 from pptx.util import Inches
@@ -23,10 +23,11 @@ import pandas as pd
 # Inisialisasi Aplikasi
 app = FastAPI(
     title="Aplikasi Konverter PDF",
-    version="3.0 (Editable Version)",
+    version="3.1 (Optimized Version)",
 )
 
 # Setup CORS
+# PENTING: Jika sudah ada domain frontend, ubah ["*"] jadi ["https://domain-kamu.com"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,6 +38,9 @@ app.add_middleware(
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Konfigurasi
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
 # Helper hapus folder
 def cleanup_folder(path: str):
     try:
@@ -46,18 +50,33 @@ def cleanup_folder(path: str):
     except Exception as e:
         logging.error(f"Error cleaning up: {e}")
 
+# Helper validasi file
+def validate_file(file: UploadFile):
+    # Cek Ekstensi
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File harus format PDF")
+    
+    # Cek Ukuran (Metode seek/tell aman untuk SpooledTemporaryFile)
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail=f"Ukuran file terlalu besar (Maks {MAX_FILE_SIZE/1024/1024}MB)")
+
 @app.get("/")
 def read_root():
-    return {"message": "Server Konverter PDF (Editable Version) sedang berjalan."}
+    return {"message": "Server Konverter PDF (Optimized) sedang berjalan."}
 
 # === FITUR 1: PDF KE DOCX (EDITABLE) ===
+# CATATAN: Menggunakan 'def' biasa (bukan async) karena ini proses berat (CPU bound).
+# FastAPI akan otomatis menjalankannya di thread pool terpisah.
 @app.post("/convert/pdf-to-docx")
-async def convert_pdf_to_docx(
+def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="File harus format PDF")
+    validate_file(file)
 
     tmp_dir = tempfile.mkdtemp()
     tmp_pdf_path = os.path.join(tmp_dir, file.filename)
@@ -65,12 +84,9 @@ async def convert_pdf_to_docx(
     tmp_docx_path = os.path.join(tmp_dir, docx_filename)
 
     try:
-        # Simpan PDF
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # PROSES KONVERSI: MENGGUNAKAN PDF2DOCX
-        # Library ini membaca teks dan layout, bukan mengubah jadi gambar.
         cv = Converter(tmp_pdf_path)
         cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False, cpu_count=1)
         cv.close()
@@ -91,12 +107,11 @@ async def convert_pdf_to_docx(
 
 # === FITUR 2: PDF KE EXCEL ===
 @app.post("/convert/pdf-to-excel")
-async def convert_pdf_to_excel(
+def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="File harus format PDF")
+    validate_file(file)
 
     tmp_dir = tempfile.mkdtemp()
     tmp_pdf_path = os.path.join(tmp_dir, file.filename)
@@ -137,12 +152,11 @@ async def convert_pdf_to_excel(
 
 # === FITUR 3: PDF KE PPTX ===
 @app.post("/convert/pdf-to-ppt")
-async def convert_pdf_to_ppt(
+def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="File harus format PDF")
+    validate_file(file)
 
     tmp_dir = tempfile.mkdtemp()
     tmp_pdf_path = os.path.join(tmp_dir, file.filename)
@@ -186,17 +200,15 @@ async def convert_pdf_to_ppt(
 
 # === FITUR 4: PDF KE GAMBAR ===
 @app.post("/convert/pdf-to-image")
-async def convert_pdf_to_image(
+def convert_pdf_to_image(
     background_tasks: BackgroundTasks,
     output_format: str = "png",
     file: UploadFile = File(...)
 ):
+    validate_file(file)
     fmt = output_format.lower()
     if fmt not in ["jpg", "jpeg", "png"]:
         raise HTTPException(status_code=400, detail="Format tidak didukung.")
-
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="File harus format PDF")
 
     tmp_dir = tempfile.mkdtemp()
     tmp_pdf_path = os.path.join(tmp_dir, file.filename)
