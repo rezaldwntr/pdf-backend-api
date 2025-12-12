@@ -19,6 +19,9 @@ from pptx import Presentation
 from pptx.util import Inches
 import pdfplumber
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from pptx.util import Pt
 
 # Inisialisasi Aplikasi
 app = FastAPI(
@@ -105,7 +108,8 @@ def convert_pdf_to_docx(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
-# === FITUR 2: PDF KE EXCEL ===
+
+# === FITUR 2: PDF KE EXCEL (ADVANCED) ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -122,19 +126,87 @@ def convert_pdf_to_excel(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
+        # Siapkan Workbook Excel Manual
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Hasil Convert"
+
+        all_table_data = []
+        header_text = []
+        footer_text = []
+
         with pdfplumber.open(tmp_pdf_path) as pdf:
-            with pd.ExcelWriter(tmp_xlsx_path, engine='openpyxl') as writer:
-                tables_found = False
-                for i, page in enumerate(pdf.pages):
-                    tables = page.extract_tables()
-                    if tables:
-                        tables_found = True
-                        for table in tables:
-                            df = pd.DataFrame(table)
-                            df.to_excel(writer, sheet_name=f"Page {i+1}", index=False, header=False)
-                
-                if not tables_found:
-                     pd.DataFrame(["Tidak ditemukan tabel"]).to_excel(writer, sheet_name="Info")
+            # 1. AMBIL HEADER (JUDUL) DARI HALAMAN PERTAMA
+            # Asumsi: Judul ada di bagian atas halaman 1 (misal 20% teratas)
+            first_page = pdf.pages[0]
+            # Ambil teks area atas (header)
+            # Crop box: (x0, top, x1, bottom)
+            header_crop = first_page.crop((0, 0, first_page.width, first_page.height * 0.2)) 
+            raw_header = header_crop.extract_text()
+            if raw_header:
+                header_text = raw_header.split('\n')
+
+            # 2. AMBIL TABEL DARI SEMUA HALAMAN (MERGE SHEET)
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    # Bersihkan data None/Null
+                    cleaned_table = [[cell if cell is not None else "" for cell in row] for row in table]
+                    all_table_data.extend(cleaned_table)
+
+            # 3. AMBIL FOOTER (TANDA TANGAN) DARI HALAMAN TERAKHIR
+            # Asumsi: Tanda tangan ada di 20% terbawah halaman terakhir
+            last_page = pdf.pages[-1]
+            footer_crop = last_page.crop((0, last_page.height * 0.8, last_page.width, last_page.height))
+            raw_footer = footer_crop.extract_text()
+            if raw_footer:
+                footer_text = raw_footer.split('\n')
+
+        # === MENULIS KE EXCEL ===
+        
+        # A. Tulis Header (Judul)
+        current_row = 1
+        for line in header_text:
+            ws.cell(row=current_row, column=1, value=line)
+            current_row += 1
+        
+        current_row += 1 # Kasih jarak 1 baris kosong
+
+        # B. Tulis Data Tabel (Merged)
+        if all_table_data:
+            # Menggunakan pandas agar lebih rapi handling datanya, lalu convert ke rows openpyxl
+            df = pd.DataFrame(all_table_data)
+            
+            # Jika baris pertama PDF terdeteksi sebagai header berulang, kita bisa skip di logic ini
+            # Tapi untuk aman, kita dump semua dulu.
+            
+            for r in dataframe_to_rows(df, index=False, header=False):
+                ws.append(r)
+                current_row += 1
+        else:
+            ws.cell(row=current_row, column=1, value="Tidak ada data tabel ditemukan.")
+            current_row += 1
+
+        current_row += 2 # Jarak sebelum tanda tangan
+
+        # C. Tulis Footer (Tanda Tangan)
+        # Tantangan: Membuat Zig-Zag (1... 2...) otomatis itu sulit tanpa koordinat pasti.
+        # Kita akan dump teksnya, user tinggal geser kolomnya.
+        ws.cell(row=current_row, column=1, value="--- Bagian Tanda Tangan ---")
+        current_row += 1
+        for line in footer_text:
+            # Coba deteksi jika ada pola "Nama ...... (Jarak) ...... Nama"
+            # Split berdasarkan spasi lebar
+            parts = line.split("   ") 
+            col_idx = 1
+            for part in parts:
+                if part.strip():
+                    ws.cell(row=current_row, column=col_idx, value=part.strip())
+                    # Lompat kolom biar ada efek jarak (simulasi zig-zag sederhana)
+                    col_idx += 3 
+            current_row += 1
+
+        wb.save(tmp_xlsx_path)
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
@@ -150,7 +222,8 @@ def convert_pdf_to_excel(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
 
-# === FITUR 3: PDF KE PPTX ===
+
+# === FITUR 3: PDF KE PPTX (TEXT + IMAGES) ===
 @app.post("/convert/pdf-to-ppt")
 def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
@@ -172,14 +245,64 @@ def convert_pdf_to_ppt(
         prs.slide_height = Inches(7.5)
         
         doc = fitz.open(tmp_pdf_path)
-        for i, page in enumerate(doc):
+
+        for page_num, page in enumerate(doc):
             blank_slide_layout = prs.slide_layouts[6] 
             slide = prs.slides.add_slide(blank_slide_layout)
+
+            # Gunakan get_text("dict") untuk mendapatkan struktur lebih lengkap (termasuk gambar)
+            blocks = page.get_text("dict")["blocks"]
             
-            pix = page.get_pixmap(dpi=150)
-            img_filename = os.path.join(tmp_dir, f"slide_{i}.png")
-            pix.save(img_filename)
-            slide.shapes.add_picture(img_filename, 0, 0, width=prs.slide_width, height=prs.slide_height)
+            for b in blocks:
+                # Tipe 0 = Teks
+                if b["type"] == 0: 
+                    bbox = b["bbox"]
+                    # Koordinat PDF
+                    x0, y0, x1, y1 = bbox
+                    
+                    # Konversi ke PPTX (Inches)
+                    left = Inches(x0 / 72)
+                    top = Inches(y0 / 72)
+                    width = Inches((x1 - x0) / 72)
+                    height = Inches((y1 - y0) / 72)
+
+                    # Gabungkan teks dalam satu blok
+                    text_content = ""
+                    for line in b["lines"]:
+                        for span in line["spans"]:
+                            text_content += span["text"] + " "
+                    
+                    if text_content.strip():
+                        txBox = slide.shapes.add_textbox(left, top, width, height)
+                        tf = txBox.text_frame
+                        tf.word_wrap = True # Agar teks tidak memanjang ke samping
+                        p = tf.add_paragraph()
+                        p.text = text_content
+                        p.font.size = Pt(11) # Ukuran font standar
+
+                # Tipe 1 = Gambar
+                elif b["type"] == 1:
+                    bbox = b["bbox"]
+                    x0, y0, x1, y1 = bbox
+                    
+                    left = Inches(x0 / 72)
+                    top = Inches(y0 / 72)
+                    width = Inches((x1 - x0) / 72)
+                    height = Inches((y1 - y0) / 72)
+                    
+                    # Ekstrak data gambar
+                    image_bytes = b["image"]
+                    image_ext = b["ext"]
+                    image_filename = os.path.join(tmp_dir, f"img_{page_num}_{id(b)}.{image_ext}")
+                    
+                    with open(image_filename, "wb") as img_file:
+                        img_file.write(image_bytes)
+                    
+                    # Tempel gambar ke slide
+                    try:
+                        slide.shapes.add_picture(image_filename, left, top, width=width, height=height)
+                    except Exception as img_err:
+                        logging.warning(f"Gagal menambah gambar: {img_err}")
 
         prs.save(tmp_ppt_path)
         doc.close()
@@ -197,56 +320,3 @@ def convert_pdf_to_ppt(
         logging.error("!!! ERROR PDF TO PPT !!!")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gagal convert PPT: {str(e)}")
-
-# === FITUR 4: PDF KE GAMBAR ===
-@app.post("/convert/pdf-to-image")
-def convert_pdf_to_image(
-    background_tasks: BackgroundTasks,
-    output_format: str = "png",
-    file: UploadFile = File(...)
-):
-    validate_file(file)
-    fmt = output_format.lower()
-    if fmt not in ["jpg", "jpeg", "png"]:
-        raise HTTPException(status_code=400, detail="Format tidak didukung.")
-
-    tmp_dir = tempfile.mkdtemp()
-    tmp_pdf_path = os.path.join(tmp_dir, file.filename)
-    zip_filename = os.path.splitext(file.filename)[0] + f"_images_{fmt}.zip"
-    tmp_zip_path = os.path.join(tmp_dir, zip_filename)
-    images_folder = os.path.join(tmp_dir, "processed_images")
-    os.makedirs(images_folder, exist_ok=True)
-
-    try:
-        with open(tmp_pdf_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        doc = fitz.open(tmp_pdf_path)
-        use_alpha = False if fmt in ["jpg", "jpeg"] else True
-
-        for i, page in enumerate(doc):
-            pix = page.get_pixmap(dpi=150, alpha=use_alpha)
-            img_path = os.path.join(images_folder, f"page_{str(i+1).zfill(3)}.{fmt}")
-            pix.save(img_path)
-
-        doc.close()
-
-        with zipfile.ZipFile(tmp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(images_folder):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    zipf.write(file_path, arcname=file)
-
-        background_tasks.add_task(cleanup_folder, tmp_dir)
-
-        return FileResponse(
-            path=tmp_zip_path,
-            filename=zip_filename,
-            media_type='application/zip'
-        )
-
-    except Exception as e:
-        cleanup_folder(tmp_dir)
-        logging.error("!!! ERROR PDF TO IMAGE !!!")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Gagal convert Image: {str(e)}")
