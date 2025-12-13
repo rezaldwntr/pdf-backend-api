@@ -109,7 +109,7 @@ def convert_pdf_to_docx(
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
 
-# === FITUR 2: PDF KE EXCEL (ADVANCED) ===
+# === FITUR 2: PDF KE EXCEL (REVISI: HEADER + MERGED TABLES ONLY) ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -133,78 +133,47 @@ def convert_pdf_to_excel(
 
         all_table_data = []
         header_text = []
-        footer_text = []
 
         with pdfplumber.open(tmp_pdf_path) as pdf:
             # 1. AMBIL HEADER (JUDUL) DARI HALAMAN PERTAMA
-            # Asumsi: Judul ada di bagian atas halaman 1 (misal 20% teratas)
-            first_page = pdf.pages[0]
-            # Ambil teks area atas (header)
-            # Crop box: (x0, top, x1, bottom)
-            header_crop = first_page.crop((0, 0, first_page.width, first_page.height * 0.2)) 
-            raw_header = header_crop.extract_text()
-            if raw_header:
-                header_text = raw_header.split('\n')
+            # Mengambil teks dari 20% area teratas halaman pertama
+            if len(pdf.pages) > 0:
+                first_page = pdf.pages[0]
+                # Crop box: (x0, top, x1, bottom)
+                header_crop = first_page.crop((0, 0, first_page.width, first_page.height * 0.2)) 
+                raw_header = header_crop.extract_text()
+                if raw_header:
+                    header_text = raw_header.split('\n')
 
             # 2. AMBIL TABEL DARI SEMUA HALAMAN (MERGE SHEET)
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
-                    # Bersihkan data None/Null
+                    # Bersihkan data None/Null agar tidak error saat masuk Excel
                     cleaned_table = [[cell if cell is not None else "" for cell in row] for row in table]
                     all_table_data.extend(cleaned_table)
 
-            # 3. AMBIL FOOTER (TANDA TANGAN) DARI HALAMAN TERAKHIR
-            # Asumsi: Tanda tangan ada di 20% terbawah halaman terakhir
-            last_page = pdf.pages[-1]
-            footer_crop = last_page.crop((0, last_page.height * 0.8, last_page.width, last_page.height))
-            raw_footer = footer_crop.extract_text()
-            if raw_footer:
-                footer_text = raw_footer.split('\n')
-
         # === MENULIS KE EXCEL ===
         
-        # A. Tulis Header (Judul)
         current_row = 1
+
+        # A. Tulis Header (Judul)
         for line in header_text:
             ws.cell(row=current_row, column=1, value=line)
             current_row += 1
         
-        current_row += 1 # Kasih jarak 1 baris kosong
+        current_row += 1 # Beri jarak 1 baris kosong setelah judul
 
         # B. Tulis Data Tabel (Merged)
         if all_table_data:
-            # Menggunakan pandas agar lebih rapi handling datanya, lalu convert ke rows openpyxl
+            # Convert list ke DataFrame dulu agar rapi
             df = pd.DataFrame(all_table_data)
             
-            # Jika baris pertama PDF terdeteksi sebagai header berulang, kita bisa skip di logic ini
-            # Tapi untuk aman, kita dump semua dulu.
-            
+            # Tulis ke Excel baris per baris
             for r in dataframe_to_rows(df, index=False, header=False):
                 ws.append(r)
-                current_row += 1
         else:
             ws.cell(row=current_row, column=1, value="Tidak ada data tabel ditemukan.")
-            current_row += 1
-
-        current_row += 2 # Jarak sebelum tanda tangan
-
-        # C. Tulis Footer (Tanda Tangan)
-        # Tantangan: Membuat Zig-Zag (1... 2...) otomatis itu sulit tanpa koordinat pasti.
-        # Kita akan dump teksnya, user tinggal geser kolomnya.
-        ws.cell(row=current_row, column=1, value="--- Bagian Tanda Tangan ---")
-        current_row += 1
-        for line in footer_text:
-            # Coba deteksi jika ada pola "Nama ...... (Jarak) ...... Nama"
-            # Split berdasarkan spasi lebar
-            parts = line.split("   ") 
-            col_idx = 1
-            for part in parts:
-                if part.strip():
-                    ws.cell(row=current_row, column=col_idx, value=part.strip())
-                    # Lompat kolom biar ada efek jarak (simulasi zig-zag sederhana)
-                    col_idx += 3 
-            current_row += 1
 
         wb.save(tmp_xlsx_path)
 
@@ -221,7 +190,6 @@ def convert_pdf_to_excel(
         logging.error("!!! ERROR PDF TO EXCEL !!!")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
-
 
 # === FITUR 3: PDF KE PPTX (TEXT + IMAGES) ===
 @app.post("/convert/pdf-to-ppt")
