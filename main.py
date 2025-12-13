@@ -109,7 +109,7 @@ def convert_pdf_to_docx(
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
 
-# === FITUR 2: PDF KE EXCEL (REVISI: HEADER + MERGED TABLES ONLY) ===
+# === FITUR 2: PDF KE EXCEL (REVISI: DYNAMIC HEADER SEPARATION) ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -135,21 +135,36 @@ def convert_pdf_to_excel(
         header_text = []
 
         with pdfplumber.open(tmp_pdf_path) as pdf:
-            # 1. AMBIL HEADER (JUDUL) DARI HALAMAN PERTAMA
-            # Mengambil teks dari 20% area teratas halaman pertama
+            # 1. LOGIKA BARU: DETEKSI BATAS ANTARA JUDUL DAN TABEL
             if len(pdf.pages) > 0:
                 first_page = pdf.pages[0]
-                # Crop box: (x0, top, x1, bottom)
-                header_crop = first_page.crop((0, 0, first_page.width, first_page.height * 0.2)) 
-                raw_header = header_crop.extract_text()
+                
+                # Cari tabel di halaman pertama untuk tahu posisinya
+                found_tables = first_page.find_tables()
+                
+                if found_tables:
+                    # Ambil koordinat bagian ATAS dari tabel pertama (bbox[1] adalah Y-top)
+                    first_table_top = found_tables[0].bbox[1]
+                    
+                    # Ambil teks HANYA dari bagian atas halaman sampai batas atas tabel
+                    # Kurangi sedikit (-5) agar garis tabel tidak ikut terbaca
+                    safe_header_bottom = max(0, first_table_top - 5)
+                    
+                    header_crop = first_page.crop((0, 0, first_page.width, safe_header_bottom))
+                    raw_header = header_crop.extract_text()
+                else:
+                    # Jika tidak ada tabel, coba ambil 20% teratas (fallback)
+                    header_crop = first_page.crop((0, 0, first_page.width, first_page.height * 0.2))
+                    raw_header = header_crop.extract_text()
+
                 if raw_header:
                     header_text = raw_header.split('\n')
 
-            # 2. AMBIL TABEL DARI SEMUA HALAMAN (MERGE SHEET)
+            # 2. AMBIL DATA TABEL DARI SEMUA HALAMAN
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
-                    # Bersihkan data None/Null agar tidak error saat masuk Excel
+                    # Bersihkan data None menjadi string kosong
                     cleaned_table = [[cell if cell is not None else "" for cell in row] for row in table]
                     all_table_data.extend(cleaned_table)
 
@@ -157,19 +172,21 @@ def convert_pdf_to_excel(
         
         current_row = 1
 
-        # A. Tulis Header (Judul)
+        # A. Tulis Header (Judul Dokumen)
+        # Style Bold untuk judul agar lebih rapi (Opsional, tapi bagus)
+        from openpyxl.styles import Font
+        bold_font = Font(bold=True)
+
         for line in header_text:
-            ws.cell(row=current_row, column=1, value=line)
+            cell = ws.cell(row=current_row, column=1, value=line)
+            cell.font = bold_font
             current_row += 1
         
-        current_row += 1 # Beri jarak 1 baris kosong setelah judul
+        current_row += 1 # Jarak 1 baris kosong
 
-        # B. Tulis Data Tabel (Merged)
+        # B. Tulis Data Tabel
         if all_table_data:
-            # Convert list ke DataFrame dulu agar rapi
             df = pd.DataFrame(all_table_data)
-            
-            # Tulis ke Excel baris per baris
             for r in dataframe_to_rows(df, index=False, header=False):
                 ws.append(r)
         else:
