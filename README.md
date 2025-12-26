@@ -60,8 +60,3 @@ docker build -t pdf-backend .
 
 # Run Container
 docker run -d -p 8000:8000 --name zentridox-api pdf-backend
-
-⚙️ Deployment
-Project ini menggunakan GitHub Actions untuk CD otomatis. Setiap push ke branch main akan memicu deployment otomatis ke server (VPS DigitalOcean) via SSH.
-
-© 2025 Rezal Dewantara. Created for Zentridox Project.
