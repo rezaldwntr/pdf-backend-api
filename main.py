@@ -69,7 +69,7 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server Konverter PDF (Optimized) sedang berjalan."}
+    return {"message": "Server Konverter PDF sedang berjalan normal."}
 
 # === FITUR 1: PDF KE DOCX (EDITABLE) ===
 # CATATAN: Menggunakan 'def' biasa (bukan async) karena ini proses berat (CPU bound).
