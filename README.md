@@ -28,35 +28,43 @@ API ini menyediakan endpoint konversi dokumen dengan fitur canggih:
 ## 🚀 Cara Menjalankan (Local Development)
 
 1.  **Clone Repository**
-    ```bash
-    git clone [https://github.com/rezaldwntr/pdf-backend-api.git](https://github.com/rezaldwntr/pdf-backend-api.git)
+    ~~~bash
+    git clone https://github.com/rezaldwntr/pdf-backend-api.git
     cd pdf-backend-api
-    ```
+    ~~~
 
 2.  **Setup Virtual Environment**
-    ```bash
+    ~~~bash
     python -m venv venv
     source venv/bin/activate  # Windows: venv\Scripts\activate
-    ```
+    ~~~
 
 3.  **Install Dependencies**
-    ```bash
+    ~~~bash
     pip install -r requirements.txt
-    ```
+    ~~~
 
 4.  **Jalankan Server**
-    ```bash
+    ~~~bash
     uvicorn main:app --reload
-    ```
+    ~~~
     Akses dokumentasi API (Swagger UI) di: `http://localhost:8000/docs`
 
 ## 🐳 Cara Menjalankan dengan Docker
 
 Aplikasi ini sudah dilengkapi Dockerfile yang dioptimalkan (slim version).
 
-```bash
+~~~bash
 # Build Image
 docker build -t pdf-backend .
 
 # Run Container
 docker run -d -p 8000:8000 --name zentridox-api pdf-backend
+~~~
+
+## ⚙️ Deployment
+
+Project ini menggunakan **GitHub Actions** untuk CD otomatis. Setiap push ke branch `main` akan memicu deployment otomatis ke server (VPS DigitalOcean) via SSH.
+
+---
+© 2025 Rezal Dewantara. Created for Zentridox Project.
