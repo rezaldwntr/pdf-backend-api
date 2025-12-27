@@ -26,7 +26,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 # Inisialisasi Aplikasi
 app = FastAPI(
     title="Aplikasi Konverter PDF Pro",
-    version="4.3 (Speed Optimized)",
+    version="4.4 (Stable 1-vCPU Optimized)",
 )
 
 # Setup CORS
@@ -37,15 +37,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Konfigurasi Logging (HANYA ERROR & INFO PENTING)
+# Konfigurasi Logging (Silent Mode)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# Matikan log cerewet agar lebih ngebut
 logging.getLogger("pdf2docx").setLevel(logging.WARNING)
 logging.getLogger("fitz").setLevel(logging.WARNING)
 
 # Konfigurasi
-MAX_FILE_SIZE = 50 * 1024 * 1024  # Naik ke 50 MB
-TIMEOUT_LIMIT = 300 # Indikator saja
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 # Helper hapus folder
 def cleanup_folder(path: str):
@@ -70,9 +68,9 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (Speed Optimized) is Running!"}
+    return {"message": "Server PDF Backend (1-vCPU Optimized) is Running!"}
 
-# === FITUR 1: PDF KE DOCX (SPEED BOOST) ===
+# === FITUR 1: PDF KE DOCX (STABIL UNTUK 1 vCPU) ===
 @app.post("/convert/pdf-to-docx")
 def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
@@ -89,11 +87,11 @@ def convert_pdf_to_docx(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # OPTIMASI KECEPATAN: multiprocess=True
-        # Menggunakan 2 core CPU untuk memproses halaman secara paralel.
-        # Ini akan memangkas waktu proses 73 halaman dari 84s menjadi ~40s.
+        # REVISI PENTING: multiprocess=False
+        # Karena server Anda 1 vCPU, kita matikan fitur paralel agar tidak overload.
+        # Ini akan lebih stabil dan mengurangi risiko hang.
         cv = Converter(tmp_pdf_path)
-        cv.convert(tmp_docx_path, start=0, end=None, multiprocess=True, cpu_count=2)
+        cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False)
         cv.close()
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
@@ -107,8 +105,7 @@ def convert_pdf_to_docx(
     except Exception as e:
         cleanup_folder(tmp_dir)
         logging.error(f"ERROR PDF TO DOCX: {str(e)}")
-        # Tangani error spesifik jika multiprocessing gagal (misal RAM kurang)
-        raise HTTPException(status_code=500, detail=f"Gagal convert Word. Server busy atau file terlalu kompleks. Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
 
 # === FITUR 2: PDF KE EXCEL (SMART HEADER) ===
@@ -136,17 +133,13 @@ def convert_pdf_to_excel(
         header_text = []
 
         with pdfplumber.open(tmp_pdf_path) as pdf:
-            # 1. DETEKSI HEADER PINTAR
+            # Deteksi Header Halaman 1
             if len(pdf.pages) > 0:
                 first_page = pdf.pages[0]
                 found_tables = first_page.find_tables()
-                
                 crop_bottom = first_page.height * 0.15 
-                
                 if found_tables:
-                    # Ambil sedikit di atas tabel
                     crop_bottom = max(0, found_tables[0].bbox[1] - 5)
-                
                 try:
                     header_crop = first_page.crop((0, 0, first_page.width, crop_bottom))
                     raw_header = header_crop.extract_text()
@@ -155,14 +148,14 @@ def convert_pdf_to_excel(
                 except Exception:
                     pass
 
-            # 2. EKSTRAKSI TABEL
+            # Ekstraksi Tabel
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
                     cleaned_table = [[cell if cell is not None else "" for cell in row] for row in table]
                     all_table_data.extend(cleaned_table)
 
-        # TULIS EXCEL
+        # Tulis Excel
         current_row = 1
         bold_font = Font(bold=True)
         for line in header_text:
@@ -226,12 +219,10 @@ def convert_pdf_to_ppt(
                     top = Inches(y0 / 72)
                     width = Inches((x1 - x0) / 72)
                     height = Inches((y1 - y0) / 72)
-
                     text_content = ""
                     for line in b["lines"]:
                         for span in line["spans"]:
                             text_content += span["text"] + " "
-                    
                     if text_content.strip():
                         txBox = slide.shapes.add_textbox(left, top, width, height)
                         tf = txBox.text_frame
@@ -239,7 +230,6 @@ def convert_pdf_to_ppt(
                         p = tf.add_paragraph()
                         p.text = text_content
                         p.font.size = Pt(11)
-
                 elif b["type"] == 1: # GAMBAR
                     bbox = b["bbox"]
                     x0, y0, x1, y1 = bbox
@@ -294,7 +284,6 @@ def convert_pdf_to_image(
         doc = fitz.open(tmp_pdf_path)
         with zipfile.ZipFile(tmp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for i, page in enumerate(doc):
-                # Alpha False utk JPG agar tidak error
                 use_alpha = False if fmt in ["jpg", "jpeg"] else True
                 pix = page.get_pixmap(dpi=200, alpha=use_alpha)
                 img_data = pix.tobytes(fmt)
