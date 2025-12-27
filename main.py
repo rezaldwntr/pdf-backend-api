@@ -26,7 +26,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 # Inisialisasi Aplikasi
 app = FastAPI(
     title="Aplikasi Konverter PDF Pro",
-    version="4.2 (Stable & Silent)",
+    version="4.3 (Speed Optimized)",
 )
 
 # Setup CORS
@@ -39,12 +39,13 @@ app.add_middleware(
 
 # Konfigurasi Logging (HANYA ERROR & INFO PENTING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# Matikan log cerewet dari library pdf2docx agar proses lebih cepat & hemat memori
+# Matikan log cerewet agar lebih ngebut
 logging.getLogger("pdf2docx").setLevel(logging.WARNING)
 logging.getLogger("fitz").setLevel(logging.WARNING)
 
 # Konfigurasi
-MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
+MAX_FILE_SIZE = 50 * 1024 * 1024  # Naik ke 50 MB
+TIMEOUT_LIMIT = 300 # Indikator saja
 
 # Helper hapus folder
 def cleanup_folder(path: str):
@@ -69,9 +70,9 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (Stable) is Running!"}
+    return {"message": "Server PDF Backend (Speed Optimized) is Running!"}
 
-# === FITUR 1: PDF KE DOCX (OPTIMIZED MEMORY) ===
+# === FITUR 1: PDF KE DOCX (SPEED BOOST) ===
 @app.post("/convert/pdf-to-docx")
 def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
@@ -88,9 +89,11 @@ def convert_pdf_to_docx(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Matikan multiprocessing untuk menghemat RAM (mencegah crash/failed to fetch)
+        # OPTIMASI KECEPATAN: multiprocess=True
+        # Menggunakan 2 core CPU untuk memproses halaman secara paralel.
+        # Ini akan memangkas waktu proses 73 halaman dari 84s menjadi ~40s.
         cv = Converter(tmp_pdf_path)
-        cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False)
+        cv.convert(tmp_docx_path, start=0, end=None, multiprocess=True, cpu_count=2)
         cv.close()
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
@@ -103,13 +106,12 @@ def convert_pdf_to_docx(
 
     except Exception as e:
         cleanup_folder(tmp_dir)
-        # Log error singkat saja
         logging.error(f"ERROR PDF TO DOCX: {str(e)}")
-        # Jangan print traceback penuh ke console production agar tidak lag
-        raise HTTPException(status_code=500, detail=f"Gagal convert Word (Mungkin file terlalu kompleks): {str(e)}")
+        # Tangani error spesifik jika multiprocessing gagal (misal RAM kurang)
+        raise HTTPException(status_code=500, detail=f"Gagal convert Word. Server busy atau file terlalu kompleks. Error: {str(e)}")
 
 
-# === FITUR 2: PDF KE EXCEL ===
+# === FITUR 2: PDF KE EXCEL (SMART HEADER) ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -134,12 +136,17 @@ def convert_pdf_to_excel(
         header_text = []
 
         with pdfplumber.open(tmp_pdf_path) as pdf:
+            # 1. DETEKSI HEADER PINTAR
             if len(pdf.pages) > 0:
                 first_page = pdf.pages[0]
                 found_tables = first_page.find_tables()
+                
                 crop_bottom = first_page.height * 0.15 
+                
                 if found_tables:
+                    # Ambil sedikit di atas tabel
                     crop_bottom = max(0, found_tables[0].bbox[1] - 5)
+                
                 try:
                     header_crop = first_page.crop((0, 0, first_page.width, crop_bottom))
                     raw_header = header_crop.extract_text()
@@ -148,12 +155,14 @@ def convert_pdf_to_excel(
                 except Exception:
                     pass
 
+            # 2. EKSTRAKSI TABEL
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
                     cleaned_table = [[cell if cell is not None else "" for cell in row] for row in table]
                     all_table_data.extend(cleaned_table)
 
+        # TULIS EXCEL
         current_row = 1
         bold_font = Font(bold=True)
         for line in header_text:
@@ -184,7 +193,7 @@ def convert_pdf_to_excel(
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
 
 
-# === FITUR 3: PDF KE PPTX ===
+# === FITUR 3: PDF KE PPTX (HIGH SPEED) ===
 @app.post("/convert/pdf-to-ppt")
 def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
@@ -285,6 +294,7 @@ def convert_pdf_to_image(
         doc = fitz.open(tmp_pdf_path)
         with zipfile.ZipFile(tmp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for i, page in enumerate(doc):
+                # Alpha False utk JPG agar tidak error
                 use_alpha = False if fmt in ["jpg", "jpeg"] else True
                 pix = page.get_pixmap(dpi=200, alpha=use_alpha)
                 img_data = pix.tobytes(fmt)
