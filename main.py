@@ -4,7 +4,8 @@ import shutil
 import logging
 import tempfile
 import traceback
-import io  # Penting untuk in-memory processing
+import io
+import zipfile
 
 # Framework
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
@@ -25,22 +26,25 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 # Inisialisasi Aplikasi
 app = FastAPI(
     title="Aplikasi Konverter PDF Pro",
-    version="4.0 (VPS Optimized)",
+    version="4.2 (Stable & Silent)",
 )
 
 # Setup CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Ganti dengan domain frontend Anda untuk keamanan ekstra
+    allow_origins=["*"], 
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Logging
+# Konfigurasi Logging (HANYA ERROR & INFO PENTING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Matikan log cerewet dari library pdf2docx agar proses lebih cepat & hemat memori
+logging.getLogger("pdf2docx").setLevel(logging.WARNING)
+logging.getLogger("fitz").setLevel(logging.WARNING)
 
 # Konfigurasi
-MAX_FILE_SIZE = 25 * 1024 * 1024  # Naikkan ke 25 MB karena server lebih kuat
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
 
 # Helper hapus folder
 def cleanup_folder(path: str):
@@ -65,9 +69,9 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (DigitalOcean Optimized) is Running!"}
+    return {"message": "Server PDF Backend (Stable) is Running!"}
 
-# === FITUR 1: PDF KE DOCX (STABIL) ===
+# === FITUR 1: PDF KE DOCX (OPTIMIZED MEMORY) ===
 @app.post("/convert/pdf-to-docx")
 def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
@@ -84,8 +88,7 @@ def convert_pdf_to_docx(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # pdf2docx sudah cukup optimal, kita biarkan default CPU count
-        # agar tidak crash di dalam container Docker.
+        # Matikan multiprocessing untuk menghemat RAM (mencegah crash/failed to fetch)
         cv = Converter(tmp_pdf_path)
         cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False)
         cv.close()
@@ -100,12 +103,13 @@ def convert_pdf_to_docx(
 
     except Exception as e:
         cleanup_folder(tmp_dir)
-        logging.error("!!! ERROR PDF TO DOCX !!!")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
+        # Log error singkat saja
+        logging.error(f"ERROR PDF TO DOCX: {str(e)}")
+        # Jangan print traceback penuh ke console production agar tidak lag
+        raise HTTPException(status_code=500, detail=f"Gagal convert Word (Mungkin file terlalu kompleks): {str(e)}")
 
 
-# === FITUR 2: PDF KE EXCEL (SMART HEADER DETECTION) ===
+# === FITUR 2: PDF KE EXCEL ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -130,50 +134,34 @@ def convert_pdf_to_excel(
         header_text = []
 
         with pdfplumber.open(tmp_pdf_path) as pdf:
-            # 1. DETEKSI HEADER PINTAR (Hanya Halaman 1)
             if len(pdf.pages) > 0:
                 first_page = pdf.pages[0]
                 found_tables = first_page.find_tables()
-                
-                # Default: Ambil 15% atas jika tidak ketemu tabel
                 crop_bottom = first_page.height * 0.15 
-                
                 if found_tables:
-                    # Jika ada tabel, ambil area DI ATAS tabel tersebut
-                    # bbox[1] adalah posisi Y (atas) dari tabel
                     crop_bottom = max(0, found_tables[0].bbox[1] - 5)
-                
-                # Crop dan Ambil Teks Header
                 try:
                     header_crop = first_page.crop((0, 0, first_page.width, crop_bottom))
                     raw_header = header_crop.extract_text()
                     if raw_header:
                         header_text = raw_header.split('\n')
                 except Exception:
-                    # Fallback jika crop gagal
                     pass
 
-            # 2. EKSTRAKSI TABEL (SEMUA HALAMAN DI-MERGE)
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
-                    # Bersihkan None -> String kosong
                     cleaned_table = [[cell if cell is not None else "" for cell in row] for row in table]
                     all_table_data.extend(cleaned_table)
 
-        # === PENULISAN KE EXCEL ===
         current_row = 1
-
-        # Tulis Judul (Bold)
         bold_font = Font(bold=True)
         for line in header_text:
             cell = ws.cell(row=current_row, column=1, value=line)
             cell.font = bold_font
             current_row += 1
-        
-        current_row += 1 # Spasi
+        current_row += 1 
 
-        # Tulis Tabel
         if all_table_data:
             df = pd.DataFrame(all_table_data)
             for r in dataframe_to_rows(df, index=False, header=False):
@@ -182,7 +170,6 @@ def convert_pdf_to_excel(
             ws.cell(row=current_row, column=1, value="Tidak ada tabel terdeteksi.")
 
         wb.save(tmp_xlsx_path)
-
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
         return FileResponse(
@@ -193,12 +180,11 @@ def convert_pdf_to_excel(
 
     except Exception as e:
         cleanup_folder(tmp_dir)
-        logging.error("!!! ERROR PDF TO EXCEL !!!")
-        traceback.print_exc()
+        logging.error(f"ERROR PDF TO EXCEL: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
 
 
-# === FITUR 3: PDF KE PPTX (HIGH SPEED IN-MEMORY) ===
+# === FITUR 3: PDF KE PPTX ===
 @app.post("/convert/pdf-to-ppt")
 def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
@@ -216,24 +202,17 @@ def convert_pdf_to_ppt(
             shutil.copyfileobj(file.file, buffer)
 
         prs = Presentation()
-        prs.slide_width = Inches(13.333) # Format Widescreen 16:9
+        prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
-        
         doc = fitz.open(tmp_pdf_path)
 
         for page in doc:
-            slide = prs.slides.add_slide(prs.slide_layouts[6]) # Layout Kosong
-
-            # Gunakan get_text("dict") untuk parsing struktur lengkap
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
             blocks = page.get_text("dict")["blocks"]
-            
             for b in blocks:
-                # --- MENANGANI TEKS (EDITABLE) ---
-                if b["type"] == 0: 
+                if b["type"] == 0: # TEKS
                     bbox = b["bbox"]
                     x0, y0, x1, y1 = bbox
-                    
-                    # Konversi Point PDF ke Inch PPT
                     left = Inches(x0 / 72)
                     top = Inches(y0 / 72)
                     width = Inches((x1 - x0) / 72)
@@ -245,38 +224,29 @@ def convert_pdf_to_ppt(
                             text_content += span["text"] + " "
                     
                     if text_content.strip():
-                        # Buat Text Box
                         txBox = slide.shapes.add_textbox(left, top, width, height)
                         tf = txBox.text_frame
                         tf.word_wrap = True
                         p = tf.add_paragraph()
                         p.text = text_content
-                        p.font.size = Pt(11) # Ukuran font aman
+                        p.font.size = Pt(11)
 
-                # --- MENANGANI GAMBAR (IN-MEMORY FAST) ---
-                elif b["type"] == 1:
+                elif b["type"] == 1: # GAMBAR
                     bbox = b["bbox"]
                     x0, y0, x1, y1 = bbox
-                    
                     left = Inches(x0 / 72)
                     top = Inches(y0 / 72)
                     width = Inches((x1 - x0) / 72)
                     height = Inches((y1 - y0) / 72)
-                    
-                    # INI KUNCI KECEPATAN:
-                    # Langsung stream bytes gambar ke RAM, tidak perlu save ke file
                     image_bytes = b["image"]
                     image_stream = io.BytesIO(image_bytes)
-                    
                     try:
                         slide.shapes.add_picture(image_stream, left, top, width=width, height=height)
                     except Exception:
-                        # Skip jika gambar corrupt/format tidak didukung PPT
                         continue
 
         prs.save(tmp_ppt_path)
         doc.close()
-
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
         return FileResponse(
@@ -287,6 +257,50 @@ def convert_pdf_to_ppt(
 
     except Exception as e:
         cleanup_folder(tmp_dir)
-        logging.error("!!! ERROR PDF TO PPT !!!")
-        traceback.print_exc()
+        logging.error(f"ERROR PDF TO PPT: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert PPT: {str(e)}")
+
+
+# === FITUR 4: PDF KE GAMBAR (ZIP) ===
+@app.post("/convert/pdf-to-image")
+def convert_pdf_to_image(
+    background_tasks: BackgroundTasks,
+    output_format: str = "png",
+    file: UploadFile = File(...)
+):
+    validate_file(file)
+    fmt = output_format.lower()
+    if fmt not in ["jpg", "jpeg", "png"]:
+        raise HTTPException(status_code=400, detail="Format tidak didukung. Gunakan jpg/png.")
+
+    tmp_dir = tempfile.mkdtemp()
+    tmp_pdf_path = os.path.join(tmp_dir, file.filename)
+    zip_filename = os.path.splitext(file.filename)[0] + f"_images_{fmt}.zip"
+    tmp_zip_path = os.path.join(tmp_dir, zip_filename)
+    
+    try:
+        with open(tmp_pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        doc = fitz.open(tmp_pdf_path)
+        with zipfile.ZipFile(tmp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for i, page in enumerate(doc):
+                use_alpha = False if fmt in ["jpg", "jpeg"] else True
+                pix = page.get_pixmap(dpi=200, alpha=use_alpha)
+                img_data = pix.tobytes(fmt)
+                img_name = f"page_{str(i+1).zfill(3)}.{fmt}"
+                zipf.writestr(img_name, img_data)
+
+        doc.close()
+        background_tasks.add_task(cleanup_folder, tmp_dir)
+
+        return FileResponse(
+            path=tmp_zip_path,
+            filename=zip_filename,
+            media_type='application/zip'
+        )
+
+    except Exception as e:
+        cleanup_folder(tmp_dir)
+        logging.error(f"ERROR PDF TO IMAGE: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Gagal convert Image: {str(e)}")
