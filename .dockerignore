@@ -1,21 +1,6 @@
-# Abaikan folder git
+__pycache__
+.venv
+.idx
 .git
 .gitignore
-
-# Abaikan file cache Python
-__pycache__
 *.pyc
-*.pyo
-*.pyd
-
-# Abaikan environment lokal
-venv/
-env/
-.env
-
-# Abaikan file temp project IDX/VSCode
-.idx/
-.vscode/
-
-# Abaikan file temp OS
-.DS_Store
