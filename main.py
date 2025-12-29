@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 2.1 (Performance Patch for Large Files)
+Versi: 2.2 (Editable PPT & Better Excel Logic)
 """
 import os
 import shutil
@@ -31,7 +31,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="2.1",
+    version="2.2",
 )
 
 # Helper untuk hapus folder (jika belum ada)
@@ -57,11 +57,9 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (Thread Optimized) is Running!"}
+    return {"message": "Server PDF Backend (Editable Version) is Running!"}
 
 # === FITUR 1: PDF KE DOCX ===
-# REVISI: Menggunakan `def` biasa (bukan async) agar FastAPI menjalankan ini di thread pool
-# Ini mencegah server "hang" saat memproses file berat.
 @app.post("/convert/pdf-to-docx")
 def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
@@ -97,7 +95,7 @@ def convert_pdf_to_docx(
         logging.error(f"ERROR PDF TO DOCX: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
-# === FITUR 2: PDF KE EXCEL ===
+# === FITUR 2: PDF KE EXCEL (DIPERBAIKI: Gabung Sheet) ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -114,23 +112,29 @@ def convert_pdf_to_excel(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Logika ekstraksi tabel dengan pdfplumber
+        # Logika ekstraksi tabel yang diperbarui (Menggabungkan semua tabel)
         with pdfplumber.open(tmp_pdf_path) as pdf:
             with pd.ExcelWriter(tmp_xlsx_path, engine='openpyxl') as writer:
-                has_tables = False
-                for i, page in enumerate(pdf.pages):
-                    tables = page.extract_tables()
-                    if tables:
-                        has_tables = True
-                        for j, table in enumerate(tables):
-                            df = pd.DataFrame(table)
-                            # Simpan setiap tabel di sheet atau gabungkan
-                            sheet_name = f"Page{i+1}_Table{j+1}"
-                            df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+                all_rows = []
                 
-                # Jika tidak ada tabel ditemukan, buat sheet kosong dengan pesan
-                if not has_tables:
-                    pd.DataFrame(["No tables found in PDF"]).to_excel(writer, sheet_name="Info", index=False, header=False)
+                # Kumpulkan semua data dari semua halaman terlebih dahulu
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if table:
+                            # Bersihkan data None menjadi string kosong
+                            clean_table = [[cell if cell is not None else "" for cell in row] for row in table]
+                            all_rows.extend(clean_table)
+                            # Tambahkan baris kosong sebagai pemisah antar tabel
+                            all_rows.append([]) 
+
+                if all_rows:
+                    df = pd.DataFrame(all_rows)
+                    # Simpan ke satu sheet utama agar mudah diedit
+                    df.to_excel(writer, sheet_name="Hasil Konversi", index=False, header=False)
+                else:
+                    # Jika tidak ada tabel ditemukan
+                    pd.DataFrame(["Tidak ada tabel ditemukan dalam PDF"]).to_excel(writer, sheet_name="Info", index=False, header=False)
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
@@ -145,7 +149,7 @@ def convert_pdf_to_excel(
         logging.error(f"ERROR PDF TO EXCEL: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
 
-# === FITUR 3: PDF KE PPTX ===
+# === FITUR 3: PDF KE PPTX (DIPERBAIKI: Text Box Editable) ===
 @app.post("/convert/pdf-to-ppt")
 def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
@@ -162,26 +166,46 @@ def convert_pdf_to_ppt(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Konversi PDF ke PPTX (Metode Gambar per Slide untuk mempertahankan layout)
+        # Konversi PDF ke PPTX (Metode Text Extraction agar Editable)
         prs = Presentation()
         doc = fitz.open(tmp_pdf_path)
 
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            pix = page.get_pixmap(dpi=150)
-            img_path = os.path.join(tmp_dir, f"page_{page_num}.png")
-            pix.save(img_path)
+        for page_num, page in enumerate(doc):
+            # 1. Buat slide kosong (Layout 6 = Blank)
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            
+            # 2. Ambil blok teks dari halaman PDF
+            # "dict" memberikan koordinat dan isi teks
+            blocks = page.get_text("dict")["blocks"]
+            
+            for b in blocks:
+                if b['type'] == 0: # Tipe 0 adalah Teks
+                    for line in b["lines"]:
+                        for span in line["spans"]:
+                            text = span["text"]
+                            # Skip teks kosong
+                            if not text.strip():
+                                continue
+                                
+                            # Ambil koordinat (x, y) dari PDF
+                            x, y = span["bbox"][:2]
+                            
+                            # Konversi koordinat PDF (points) ke PPTX (Inches)
+                            # 1 Inch = 72 Points (standar PDF)
+                            left = Inches(x / 72)
+                            top = Inches(y / 72)
+                            
+                            # Ukuran Textbox (lebar default 5 inci, tinggi menyesuaikan)
+                            width = Inches(5) 
+                            height = Inches(0.5)
 
-            # Tambah slide blank
-            blank_slide_layout = prs.slide_layouts[6]
-            slide = prs.slides.add_slide(blank_slide_layout)
-
-            # Hitung aspek rasio agar fit di slide
-            # Ukuran default slide PPTX biasanya 10x7.5 inches
-            left = top = Inches(0)
-            # Kita set gambar agar fit full slide (atau sesuaikan kebutuhan)
-            # Untuk sekarang kita set fit height 7.5 inches
-            slide.shapes.add_picture(img_path, left, top, height=Inches(7.5))
+                            # Tambahkan Textbox ke slide
+                            txBox = slide.shapes.add_textbox(left, top, width, height)
+                            tf = txBox.text_frame
+                            tf.text = text
+                            
+                            # Opsional: Jika ingin menambahkan gambar juga, logika type==1 bisa ditambahkan disini
+                            # Namun fokus saat ini adalah teks yang bisa diedit.
 
         doc.close()
         prs.save(tmp_ppt_path)
