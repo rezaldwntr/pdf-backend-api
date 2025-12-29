@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 2.6 (Full Page Layout: Text + Tables + Smart Alignment)
+Versi: 2.7 (Fix MergedCell Error & Layout Engine)
 """
 import os
 import shutil
@@ -33,7 +33,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="2.6",
+    version="2.7",
 )
 
 # Mengizinkan akses dari Frontend
@@ -68,7 +68,7 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (Full Layout Engine) is Running!"}
+    return {"message": "Server PDF Backend (Stable Version) is Running!"}
 
 # === FITUR 1: PDF KE DOCX ===
 @app.post("/convert/pdf-to-docx")
@@ -108,14 +108,12 @@ def convert_pdf_to_docx(
 # Helper function: Cek apakah kata ada di dalam area tabel
 def is_inside_table(word_bbox, table_bboxes):
     # word_bbox = (x0, top, x1, bottom)
-    # table_bbox = (x0, top, x1, bottom)
     wx0, wtop, wx1, wbottom = word_bbox
     w_mid_x = (wx0 + wx1) / 2
     w_mid_y = (wtop + wbottom) / 2
     
     for tbox in table_bboxes:
         tx0, ttop, tx1, tbottom = tbox
-        # Cek apakah titik tengah kata ada di dalam kotak tabel
         if tx0 <= w_mid_x <= tx1 and ttop <= w_mid_y <= tbottom:
             return True
     return False
@@ -126,16 +124,13 @@ def cluster_words_into_lines(words, tolerance=3):
     if not words:
         return lines
         
-    # Urutkan berdasarkan posisi Y (top)
     sorted_words = sorted(words, key=lambda w: w['top'])
-    
     current_line = [sorted_words[0]]
     
     for i in range(1, len(sorted_words)):
         word = sorted_words[i]
         prev_word = current_line[-1]
         
-        # Jika posisi Y berdekatan (toleransi piksel), anggap satu baris
         if abs(word['top'] - prev_word['top']) < tolerance:
             current_line.append(word)
         else:
@@ -143,14 +138,10 @@ def cluster_words_into_lines(words, tolerance=3):
             current_line = [word]
     lines.append(current_line)
     
-    # Proses setiap line untuk menggabungkan teks
     final_lines = []
     for line in lines:
-        # Urutkan kata dari kiri ke kanan (x0)
         line.sort(key=lambda w: w['x0'])
         text_content = " ".join([w['text'] for w in line])
-        
-        # Hitung bounding box baris ini
         x0 = min(w['x0'] for w in line)
         top = min(w['top'] for w in line)
         x1 = max(w['x1'] for w in line)
@@ -203,45 +194,29 @@ def convert_pdf_to_excel(
                     
                     # 1. AMBIL TABEL
                     tables = page.find_tables()
-                    table_bboxes = [t.bbox for t in tables] # (x0, top, x1, bottom)
+                    table_bboxes = [t.bbox for t in tables]
                     
                     # 2. AMBIL TEXT (NON-TABEL)
                     words = page.extract_words()
                     non_table_words = []
                     
                     for w in words:
-                        # Format w: {'text': '...', 'x0': 10, 'top': 20, ...}
-                        # Ubah ke tuple bbox untuk pengecekan
                         w_bbox = (w['x0'], w['top'], w['x1'], w['bottom'])
                         if not is_inside_table(w_bbox, table_bboxes):
                             non_table_words.append(w)
                     
-                    # Group words menjadi baris kalimat
                     text_lines = cluster_words_into_lines(non_table_words)
                     
-                    # 3. GABUNGKAN SEMUA ELEMENT (TABEL + TEKS)
-                    # Kita buat list "master" yang berisi semua objek
-                    # tipe: 'text' atau 'table'
+                    # 3. GABUNGKAN & URUTKAN
                     page_elements = []
-                    
                     for t in tables:
-                        page_elements.append({
-                            'type': 'table',
-                            'top': t.bbox[1], # Posisi Y atas
-                            'obj': t
-                        })
-                        
+                        page_elements.append({'type': 'table', 'top': t.bbox[1], 'obj': t})
                     for l in text_lines:
-                        page_elements.append({
-                            'type': 'text',
-                            'top': l['top'],
-                            'obj': l
-                        })
+                        page_elements.append({'type': 'text', 'top': l['top'], 'obj': l})
                     
-                    # 4. URUTKAN BERDASARKAN POSISI Y (ATAS KE BAWAH)
                     page_elements.sort(key=lambda x: x['top'])
                     
-                    # 5. TULIS KE EXCEL
+                    # 4. TULIS KE EXCEL
                     for element in page_elements:
                         if element['type'] == 'text':
                             line = element['obj']
@@ -251,24 +226,16 @@ def convert_pdf_to_excel(
                             
                             cell = worksheet.cell(row=current_excel_row, column=1, value=text)
                             
-                            # Logika Alignment Sederhana
-                            # Hitung titik tengah teks
                             text_center = (x0 + x1) / 2
                             page_center = page_width / 2
                             
-                            # Jika tengah teks berada di dekat tengah halaman (toleransi 10%)
                             if abs(text_center - page_center) < (page_width * 0.1):
                                 cell.alignment = Alignment(horizontal='center', vertical='center')
-                                # Merge cells agar rapi (misal kolom A-H)
                                 worksheet.merge_cells(start_row=current_excel_row, start_column=1, end_row=current_excel_row, end_column=8)
-                            elif x0 > (page_width * 0.6): # Jika mulai di sebelah kanan
+                            elif x0 > (page_width * 0.6):
                                 cell.alignment = Alignment(horizontal='right')
                             else:
                                 cell.alignment = Alignment(horizontal='left')
-                                
-                            # Jika teks tebal/bold (simulasi: biasanya judul di atas itu bold)
-                            # Karena pdfplumber extract_words tidak return font weight secara akurat, 
-                            # kita asumsikan baris sendiri di luar tabel mungkin judul jika pendek.
                             
                             current_excel_row += 1
                         
@@ -277,50 +244,51 @@ def convert_pdf_to_excel(
                             data = table.extract()
                             if not data: continue
                             
-                            # Bersihkan data
                             clean_data = [[c if c is not None else "" for c in r] for r in data]
                             df = pd.DataFrame(clean_data)
                             
-                            # Tulis tabel
                             start_row = current_excel_row
                             df.to_excel(writer, sheet_name="Hasil Konversi", startrow=start_row-1, startcol=0, index=False, header=False)
                             
-                            # Styling Tabel
                             end_row = start_row + len(df)
                             end_col = len(df.columns)
-                            
-                            # Cek alignment header tabel asli (row pertama)
-                            header_rects = table.rows[0]
                             
                             for r_idx, row_cells in enumerate(worksheet.iter_rows(min_row=start_row, max_row=end_row-1, min_col=1, max_col=end_col)):
                                 is_header = (r_idx == 0)
                                 for c_idx, cell in enumerate(row_cells):
                                     cell.border = thin_border
                                     cell.alignment = Alignment(vertical='top', wrap_text=True)
-                                    
                                     if is_header:
                                         cell.font = header_font
                                         cell.fill = header_fill
                                         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                                        # (Logika alignment spesifik per kolom bisa ditambahkan disini seperti versi sebelumnya jika perlu)
                             
-                            # Update pointer baris
-                            current_excel_row = end_row + 1 # Beri jarak 1 baris
+                            current_excel_row = end_row + 1
                     
-                    current_excel_row += 2 # Jarak antar halaman PDF
+                    current_excel_row += 2
 
-                # Finishing: Auto Width Column
-                for col in worksheet.columns:
-                    max_length = 0
-                    column = col[0].column_letter
-                    for cell in col:
-                        try:
-                            if cell.value and len(str(cell.value)) > max_length:
-                                max_length = len(str(cell.value))
-                        except: pass
-                    adjusted_width = (max_length + 2)
-                    if adjusted_width > 60: adjusted_width = 60
-                    worksheet.column_dimensions[column].width = adjusted_width
+                # --- BAGIAN PERBAIKAN: AUTO WIDTH YANG AMAN ---
+                # Menggunakan indeks kolom, bukan iterasi cell langsung untuk hindari MergedCell Error
+                if worksheet.max_column:
+                    for col_idx in range(1, worksheet.max_column + 1):
+                        col_letter = get_column_letter(col_idx)
+                        max_length = 0
+                        
+                        # Loop rows di kolom ini untuk cari teks terpanjang
+                        for row_idx in range(1, worksheet.max_row + 1):
+                            cell = worksheet.cell(row=row_idx, column=col_idx)
+                            try:
+                                # Pastikan cell punya value dan bukan merged cell "ghost"
+                                if cell.value and len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        
+                        adjusted_width = (max_length + 2)
+                        # Batasi lebar maksimal agar tidak terlalu lebar
+                        if adjusted_width > 60: adjusted_width = 60
+                        worksheet.column_dimensions[col_letter].width = adjusted_width
+                # ----------------------------------------------
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
