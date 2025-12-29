@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 2.7 (Fix MergedCell Error & Layout Engine)
+Versi: 2.8 (Dynamic Header Merge based on Table Width)
 """
 import os
 import shutil
@@ -33,7 +33,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="2.7",
+    version="2.8",
 )
 
 # Mengizinkan akses dari Frontend
@@ -68,7 +68,7 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (Stable Version) is Running!"}
+    return {"message": "Server PDF Backend (Dynamic Merge) is Running!"}
 
 # === FITUR 1: PDF KE DOCX ===
 @app.post("/convert/pdf-to-docx")
@@ -192,7 +192,7 @@ def convert_pdf_to_excel(
                 for page_idx, page in enumerate(pdf.pages):
                     page_width = page.width
                     
-                    # 1. AMBIL TABEL
+                    # 1. AMBIL TABEL & Hitung Kolomnya
                     tables = page.find_tables()
                     table_bboxes = [t.bbox for t in tables]
                     
@@ -207,17 +207,38 @@ def convert_pdf_to_excel(
                     
                     text_lines = cluster_words_into_lines(non_table_words)
                     
-                    # 3. GABUNGKAN & URUTKAN
+                    # 3. GABUNGKAN, CALCULATE COLS, & URUTKAN
                     page_elements = []
+                    
                     for t in tables:
-                        page_elements.append({'type': 'table', 'top': t.bbox[1], 'obj': t})
+                        # Pre-calculate jumlah kolom tabel agar bisa dipakai oleh Judul diatasnya
+                        try:
+                            t_data = t.extract()
+                            if t_data and len(t_data) > 0:
+                                col_count = len(t_data[0])
+                            else:
+                                col_count = 1
+                        except:
+                            col_count = 1
+                            
+                        page_elements.append({
+                            'type': 'table', 
+                            'top': t.bbox[1], 
+                            'obj': t, 
+                            'cols': col_count # Simpan info jumlah kolom
+                        })
+                        
                     for l in text_lines:
-                        page_elements.append({'type': 'text', 'top': l['top'], 'obj': l})
+                        page_elements.append({
+                            'type': 'text', 
+                            'top': l['top'], 
+                            'obj': l
+                        })
                     
                     page_elements.sort(key=lambda x: x['top'])
                     
-                    # 4. TULIS KE EXCEL
-                    for element in page_elements:
+                    # 4. TULIS KE EXCEL DENGAN LOGIKA DINAMIS
+                    for i, element in enumerate(page_elements):
                         if element['type'] == 'text':
                             line = element['obj']
                             text = line['text']
@@ -226,12 +247,39 @@ def convert_pdf_to_excel(
                             
                             cell = worksheet.cell(row=current_excel_row, column=1, value=text)
                             
+                            # Logika Alignment & Merge Dinamis
                             text_center = (x0 + x1) / 2
                             page_center = page_width / 2
                             
+                            # Cek apakah ini judul tengah?
                             if abs(text_center - page_center) < (page_width * 0.1):
                                 cell.alignment = Alignment(horizontal='center', vertical='center')
-                                worksheet.merge_cells(start_row=current_excel_row, start_column=1, end_row=current_excel_row, end_column=8)
+                                
+                                # --- LOOK AHEAD LOGIC ---
+                                # Cari tabel terdekat di bawah teks ini untuk menentukan lebar merge
+                                target_merge_col = 1 # Default
+                                found_table = False
+                                
+                                # Loop ke depan mulai dari elemen berikutnya
+                                for next_idx in range(i + 1, len(page_elements)):
+                                    next_el = page_elements[next_idx]
+                                    if next_el['type'] == 'table':
+                                        # Ketemu tabel, ambil jumlah kolomnya
+                                        target_merge_col = next_el['cols']
+                                        found_table = True
+                                        break
+                                    # Jika ketemu teks lain yang jaraknya jauh (bukan sub-judul), stop
+                                    # Tapi kita biarkan tembus jika hanya beda baris sedikit (sub-judul)
+                                
+                                # Jika tidak ketemu tabel di bawahnya (misal footer), 
+                                # atau tabel kolomnya cuma 1, jangan merge berlebihan.
+                                if found_table and target_merge_col > 1:
+                                    worksheet.merge_cells(
+                                        start_row=current_excel_row, start_column=1, 
+                                        end_row=current_excel_row, end_column=target_merge_col
+                                    )
+                                # ------------------------
+                                
                             elif x0 > (page_width * 0.6):
                                 cell.alignment = Alignment(horizontal='right')
                             else:
@@ -267,28 +315,21 @@ def convert_pdf_to_excel(
                     
                     current_excel_row += 2
 
-                # --- BAGIAN PERBAIKAN: AUTO WIDTH YANG AMAN ---
-                # Menggunakan indeks kolom, bukan iterasi cell langsung untuk hindari MergedCell Error
+                # 5. AUTO WIDTH (Safe Mode)
                 if worksheet.max_column:
                     for col_idx in range(1, worksheet.max_column + 1):
                         col_letter = get_column_letter(col_idx)
                         max_length = 0
-                        
-                        # Loop rows di kolom ini untuk cari teks terpanjang
                         for row_idx in range(1, worksheet.max_row + 1):
                             cell = worksheet.cell(row=row_idx, column=col_idx)
                             try:
-                                # Pastikan cell punya value dan bukan merged cell "ghost"
                                 if cell.value and len(str(cell.value)) > max_length:
                                     max_length = len(str(cell.value))
-                            except:
-                                pass
+                            except: pass
                         
                         adjusted_width = (max_length + 2)
-                        # Batasi lebar maksimal agar tidak terlalu lebar
                         if adjusted_width > 60: adjusted_width = 60
                         worksheet.column_dimensions[col_letter].width = adjusted_width
-                # ----------------------------------------------
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
