@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 2.3 (Editable PPT + CORS Fixed)
+Versi: 2.4 (Excel Styling & Layout Fix)
 """
 import os
 import shutil
@@ -12,17 +12,19 @@ from zipfile import ZipFile
 # Framework
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware #
+from fastapi.middleware.cors import CORSMiddleware
 
 # Library Konversi
 from pdf2docx import Converter
 import fitz  # PyMuPDF
 from pptx import Presentation
 from pptx.util import Inches
-from docx import Document
-from docx.shared import Inches as DocxInches
 import pdfplumber
 import pandas as pd
+
+# Library Excel Styling
+from openpyxl.styles import Border, Side, Alignment, Font
+from openpyxl.utils import get_column_letter
 
 # Konfigurasi
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -31,21 +33,19 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="2.3",
+    version="2.4",
 )
 
-# === PERBAIKAN CORS ADA DI SINI ===
-# Mengizinkan frontend (pdftoolbox.app) mengakses backend ini
+# Mengizinkan akses dari Frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Gunakan "*" untuk mengizinkan semua domain (Solusi Error Anda)
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Mengizinkan semua method (POST, GET, OPTIONS, dll)
-    allow_headers=["*"],  # Mengizinkan semua header
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# ==================================
 
-# Helper untuk hapus folder (jika belum ada)
+# Helper untuk hapus folder
 def cleanup_folder(path: str):
     try:
         if os.path.exists(path):
@@ -68,7 +68,7 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (CORS Enabled) is Running!"}
+    return {"message": "Server PDF Backend (Excel Enhanced) is Running!"}
 
 # === FITUR 1: PDF KE DOCX ===
 @app.post("/convert/pdf-to-docx")
@@ -87,7 +87,6 @@ def convert_pdf_to_docx(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Konversi PDF ke DOCX
         cv = Converter(tmp_pdf_path)
         cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False)
         cv.close()
@@ -105,7 +104,7 @@ def convert_pdf_to_docx(
         logging.error(f"ERROR PDF TO DOCX: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
-# === FITUR 2: PDF KE EXCEL (Gabung Sheet) ===
+# === FITUR 2: PDF KE EXCEL (DIPERBAIKI: Styling & Layout) ===
 @app.post("/convert/pdf-to-excel")
 def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
@@ -122,22 +121,82 @@ def convert_pdf_to_excel(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        with pdfplumber.open(tmp_pdf_path) as pdf:
-            with pd.ExcelWriter(tmp_xlsx_path, engine='openpyxl') as writer:
-                all_rows = []
-                for page in pdf.pages:
-                    tables = page.extract_tables()
-                    for table in tables:
-                        if table:
-                            clean_table = [[cell if cell is not None else "" for cell in row] for row in table]
-                            all_rows.extend(clean_table)
-                            all_rows.append([]) 
+        # Menggunakan OpenPyXL Engine agar bisa styling
+        with pd.ExcelWriter(tmp_xlsx_path, engine='openpyxl') as writer:
+            with pdfplumber.open(tmp_pdf_path) as pdf:
+                
+                # Kita akan menulis manual ke worksheet agar bisa kontrol layout
+                # Inisialisasi workbook dan sheet
+                writer.book.create_sheet("Hasil Konversi")
+                worksheet = writer.book["Hasil Konversi"]
+                
+                # Hapus sheet default "Sheet" jika ada
+                if "Sheet" in writer.book.sheetnames:
+                    del writer.book["Sheet"]
+                
+                current_row = 1 # Pointer baris Excel
+                has_data = False
 
-                if all_rows:
-                    df = pd.DataFrame(all_rows)
-                    df.to_excel(writer, sheet_name="Hasil Konversi", index=False, header=False)
-                else:
-                    pd.DataFrame(["Tidak ada tabel ditemukan"]).to_excel(writer, sheet_name="Info", index=False, header=False)
+                # Style Border Tipis
+                thin_border = Border(left=Side(style='thin'), 
+                                     right=Side(style='thin'), 
+                                     top=Side(style='thin'), 
+                                     bottom=Side(style='thin'))
+
+                for i, page in enumerate(pdf.pages):
+                    tables = page.extract_tables()
+                    
+                    for table in tables:
+                        if not table:
+                            continue
+                            
+                        has_data = True
+                        
+                        # Bersihkan data (None -> "")
+                        clean_table = [[cell if cell is not None else "" for cell in row] for row in table]
+                        df = pd.DataFrame(clean_table)
+                        
+                        # 1. Tulis Judul/Header Kecil penanda Halaman (Opsional, agar rapi)
+                        header_cell = worksheet.cell(row=current_row, column=1, value=f"Page {i+1} - Table")
+                        header_cell.font = Font(bold=True, color="0000FF")
+                        current_row += 1
+                        
+                        # 2. Tulis Tabel ke Excel di posisi 'current_row'
+                        # index=False, header=False agar murni data tabel PDF
+                        df.to_excel(writer, sheet_name="Hasil Konversi", startrow=current_row-1, startcol=0, index=False, header=False)
+                        
+                        # 3. APPLY STYLING (Borders & Alignment)
+                        # Loop area yang baru saja ditulis untuk memberi garis
+                        end_row = current_row + len(df)
+                        end_col = len(df.columns)
+                        
+                        for r in range(current_row, end_row):
+                            for c in range(1, end_col + 1):
+                                cell = worksheet.cell(row=r, column=c)
+                                cell.border = thin_border
+                                cell.alignment = Alignment(wrap_text=True, vertical='top')
+                        
+                        # Update pointer baris (beri jarak 2 baris antar tabel)
+                        current_row = end_row + 2
+
+                # 4. Auto-adjust Column Width (Finishing Touch)
+                # Agar lebar kolom menyesuaikan isi teks
+                for col in worksheet.columns:
+                    max_length = 0
+                    column = col[0].column_letter # Get the column name
+                    for cell in col:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    # Set lebar (limit max 50 agar tidak terlalu lebar)
+                    adjusted_width = (max_length + 2)
+                    if adjusted_width > 50: adjusted_width = 50
+                    worksheet.column_dimensions[column].width = adjusted_width
+
+                if not has_data:
+                    worksheet.cell(row=1, column=1, value="Tidak ada tabel yang terdeteksi dalam PDF ini.")
 
         background_tasks.add_task(cleanup_folder, tmp_dir)
 
