@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 2.0 (Image-based DOCX Conversion)
+Versi: 2.1 (Performance Patch for Large Files)
 """
 import os
 import shutil
@@ -31,7 +31,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="2.0",
+    version="2.1",
 )
 
 # Helper untuk hapus folder (jika belum ada)
@@ -57,11 +57,13 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (1-vCPU Optimized) is Running!"}
+    return {"message": "Server PDF Backend (Thread Optimized) is Running!"}
 
 # === FITUR 1: PDF KE DOCX ===
+# REVISI: Menggunakan `def` biasa (bukan async) agar FastAPI menjalankan ini di thread pool
+# Ini mencegah server "hang" saat memproses file berat.
 @app.post("/convert/pdf-to-docx")
-async def convert_pdf_to_docx(
+def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
@@ -76,7 +78,8 @@ async def convert_pdf_to_docx(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # REVISI PENTING: multiprocess=False untuk stabilitas 1 vCPU
+        # Konversi PDF ke DOCX
+        # Menggunakan multiprocess=False untuk stabilitas CPU rendah
         cv = Converter(tmp_pdf_path)
         cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False)
         cv.close()
@@ -96,7 +99,7 @@ async def convert_pdf_to_docx(
 
 # === FITUR 2: PDF KE EXCEL ===
 @app.post("/convert/pdf-to-excel")
-async def convert_pdf_to_excel(
+def convert_pdf_to_excel(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
@@ -144,7 +147,7 @@ async def convert_pdf_to_excel(
 
 # === FITUR 3: PDF KE PPTX ===
 @app.post("/convert/pdf-to-ppt")
-async def convert_pdf_to_ppt(
+def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
@@ -198,7 +201,7 @@ async def convert_pdf_to_ppt(
 
 # === FITUR 4: PDF KE GAMBAR (ZIP) ===
 @app.post("/convert/pdf-to-image")
-async def convert_pdf_to_image(
+def convert_pdf_to_image(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     output_format: str = "png"
