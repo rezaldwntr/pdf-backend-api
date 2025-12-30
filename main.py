@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 3.0 (Final Fix: CORS + Excel Dynamic + Word Stability)
+Versi: 4.0 (PPTX High-Fidelity: Images, Colors, Fonts & Precision Layout)
 """
 import os
 import shutil
@@ -18,7 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pdf2docx import Converter
 import fitz  # PyMuPDF
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
 import pdfplumber
 import pandas as pd
 
@@ -26,23 +27,23 @@ import pandas as pd
 from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-# Konfigurasi
-MAX_FILE_SIZE = 25 * 1024 * 1024  # Naikkan limit ke 25 MB
+# Konfigurasi Ukuran File (25MB)
+MAX_FILE_SIZE = 25 * 1024 * 1024 
 
 # Inisialisasi Aplikasi
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="3.0",
+    version="4.0",
 )
 
-# === KONFIGURASI CORS (PENTING UNTUK MENGATASI ERROR MERAH DI BROWSER) ===
+# === KONFIGURASI CORS ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Izinkan semua domain
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Izinkan semua method (POST/GET)
-    allow_headers=["*"],  # Izinkan semua header
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Helper untuk hapus folder
@@ -68,9 +69,9 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (Stability Patch) is Running!"}
+    return {"message": "Server PDF Backend (PPTX Ultimate) is Running!"}
 
-# === FITUR 1: PDF KE DOCX (Optimized) ===
+# === FITUR 1: PDF KE DOCX ===
 @app.post("/convert/pdf-to-docx")
 def convert_pdf_to_docx(
     background_tasks: BackgroundTasks,
@@ -87,8 +88,7 @@ def convert_pdf_to_docx(
         with open(tmp_pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Konversi PDF ke DOCX
-        # Menggunakan multiprocess=False wajib untuk Docker container
+        # Konversi PDF ke DOCX (Multiprocess False wajib untuk Docker)
         cv = Converter(tmp_pdf_path)
         cv.convert(tmp_docx_path, start=0, end=None, multiprocess=False)
         cv.close()
@@ -104,11 +104,9 @@ def convert_pdf_to_docx(
     except Exception as e:
         cleanup_folder(tmp_dir)
         logging.error(f"ERROR PDF TO DOCX: {str(e)}")
-        # Kirim detail error agar terbaca di log
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
-# === FITUR 2: PDF KE EXCEL (FULL LAYOUT + DYNAMIC MERGE) ===
-# Helper: Cek apakah kata ada di dalam tabel
+# === FITUR 2: PDF KE EXCEL (Full Layout & Dynamic Merge) ===
 def is_inside_table(word_bbox, table_bboxes):
     wx0, wtop, wx1, wbottom = word_bbox
     w_mid_x = (wx0 + wx1) / 2
@@ -119,7 +117,6 @@ def is_inside_table(word_bbox, table_bboxes):
             return True
     return False
 
-# Helper: Gabungkan kata jadi kalimat
 def cluster_words_into_lines(words, tolerance=3):
     lines = []
     if not words: return lines
@@ -175,7 +172,6 @@ def convert_pdf_to_excel(
                     page_width = page.width
                     tables = page.find_tables()
                     table_bboxes = [t.bbox for t in tables]
-                    
                     words = page.extract_words()
                     non_table_words = [w for w in words if not is_inside_table((w['x0'], w['top'], w['x1'], w['bottom']), table_bboxes)]
                     text_lines = cluster_words_into_lines(non_table_words)
@@ -196,7 +192,6 @@ def convert_pdf_to_excel(
                         if element['type'] == 'text':
                             line = element['obj']
                             cell = worksheet.cell(row=current_excel_row, column=1, value=line['text'])
-                            
                             text_center = (line['x0'] + line['x1']) / 2
                             if abs(text_center - (page_width / 2)) < (page_width * 0.1):
                                 cell.alignment = Alignment(horizontal='center', vertical='center')
@@ -212,7 +207,6 @@ def convert_pdf_to_excel(
                             else:
                                 cell.alignment = Alignment(horizontal='left')
                             current_excel_row += 1
-                        
                         elif element['type'] == 'table':
                             data = element['obj'].extract()
                             if not data: continue
@@ -254,7 +248,7 @@ def convert_pdf_to_excel(
         logging.error(f"ERROR PDF TO EXCEL: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
 
-# === FITUR 3: PDF KE PPTX (Editable Text) ===
+# === FITUR 3: PDF KE PPTX (High-Fidelity) ===
 @app.post("/convert/pdf-to-ppt")
 def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
@@ -272,18 +266,96 @@ def convert_pdf_to_ppt(
 
         prs = Presentation()
         doc = fitz.open(tmp_pdf_path)
-        for page in doc:
+
+        for page_index, page in enumerate(doc):
+            # Gunakan layout index 6 (Blank Slide)
             slide = prs.slides.add_slide(prs.slide_layouts[6])
+            
+            # Ambil semua blok (teks dan gambar)
             blocks = page.get_text("dict")["blocks"]
-            for b in blocks:
-                if b['type'] == 0:
+            
+            for b_index, b in enumerate(blocks):
+                # === TIPE 1: GAMBAR ===
+                if b['type'] == 1:
+                    # Ekstrak gambar dari blok
+                    img_bytes = b["image"]
+                    img_ext = b["ext"]
+                    img_name = f"page{page_index}_img{b_index}.{img_ext}"
+                    img_path = os.path.join(tmp_dir, img_name)
+                    
+                    with open(img_path, "wb") as f:
+                        f.write(img_bytes)
+                    
+                    # Posisi Gambar
+                    x0, y0, x1, y1 = b["bbox"]
+                    width = x1 - x0
+                    height = y1 - y0
+                    
+                    # Tambahkan ke Slide
+                    slide.shapes.add_picture(
+                        img_path, 
+                        Inches(x0 / 72), 
+                        Inches(y0 / 72), 
+                        width=Inches(width / 72), 
+                        height=Inches(height / 72)
+                    )
+                
+                # === TIPE 0: TEKS ===
+                elif b['type'] == 0:
+                    # Kita proses per BARIS (Line) agar posisi vertikal akurat
                     for line in b["lines"]:
+                        x0, y0, x1, y1 = line["bbox"]
+                        w = x1 - x0
+                        h = y1 - y0
+                        
+                        # Buat Text Box sesuai ukuran baris
+                        # Tambah sedikit padding tinggi agar font descender tidak terpotong
+                        txBox = slide.shapes.add_textbox(
+                            Inches(x0 / 72), 
+                            Inches(y0 / 72), 
+                            Inches(w / 72), 
+                            Inches((h+2) / 72)
+                        )
+                        tf = txBox.text_frame
+                        tf.word_wrap = False # Mencegah wrap otomatis yang merusak layout
+                        tf.margin_top = 0
+                        tf.margin_bottom = 0
+                        tf.margin_left = 0
+                        tf.margin_right = 0
+                        
+                        p = tf.paragraphs[0]
+                        
+                        # Isi teks per kata/style (Span)
                         for span in line["spans"]:
-                            if not span["text"].strip(): continue
-                            x, y = span["bbox"][:2]
-                            txBox = slide.shapes.add_textbox(Inches(x/72), Inches(y/72), Inches(5), Inches(0.5))
-                            txBox.text_frame.text = span["text"]
-        
+                            text = span["text"]
+                            # Skip jika teks kosong
+                            if not text: continue
+                                
+                            run = p.add_run()
+                            run.text = text
+                            
+                            # 1. Ukuran Font
+                            run.font.size = Pt(span["size"])
+                            
+                            # 2. Warna Teks (sRGB Integer ke RGB)
+                            # PyMuPDF color is usually sRGB integer
+                            try:
+                                c = span["color"]
+                                r = (c >> 16) & 0xFF
+                                g = (c >> 8) & 0xFF
+                                b = c & 0xFF
+                                run.font.color.rgb = RGBColor(r, g, b)
+                            except:
+                                pass # Gunakan default hitam jika gagal
+                            
+                            # 3. Style Bold / Italic (Flags)
+                            # bit 0: superscript, 1: italic, 2: serif, 3: mono, 4: bold
+                            flags = span["flags"]
+                            if flags & 2**4:
+                                run.font.bold = True
+                            if flags & 2**1:
+                                run.font.italic = True
+
         doc.close()
         prs.save(tmp_ppt_path)
         background_tasks.add_task(cleanup_folder, tmp_dir)
