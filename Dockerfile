@@ -18,6 +18,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 5. COPY SISA KODE
 COPY . .
 
-# 6. JALANKAN SERVER DENGAN TIMEOUT LEBIH PANJANG
-# Tambahkan --timeout-keep-alive 300 (5 menit) agar tidak putus saat convert berat
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "300"]
+# 6. JALANKAN SERVER (UPDATE TIMEOUT KE 1200 DETIK / 20 MENIT)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "1200"]
