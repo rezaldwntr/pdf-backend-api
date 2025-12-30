@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Aplikasi Web Konverter PDF (c) 2024
-Versi: 4.0 (PPTX High-Fidelity: Images, Colors, Fonts & Precision Layout)
+Versi: 5.0 (PPTX Ultimate Precision: Zero-Margin Text, Color Accuracy & Adaptive Layout)
 """
 import os
 import shutil
 import logging
 import tempfile
+import io
 from zipfile import ZipFile
 
 # Framework
@@ -20,8 +21,10 @@ import fitz  # PyMuPDF
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
+from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE
 import pdfplumber
 import pandas as pd
+from PIL import Image # Helper untuk cek gambar
 
 # Library Excel Styling
 from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
@@ -34,7 +37,7 @@ MAX_FILE_SIZE = 25 * 1024 * 1024
 app = FastAPI(
     title="Aplikasi Konverter PDF",
     description="API untuk mengubah format file dari PDF ke format lainnya.",
-    version="4.0",
+    version="5.0",
 )
 
 # === KONFIGURASI CORS ===
@@ -69,7 +72,7 @@ def validate_file(file: UploadFile):
 
 @app.get("/")
 def read_root():
-    return {"message": "Server PDF Backend (PPTX Ultimate) is Running!"}
+    return {"message": "Server PDF Backend (V5.0 Ultimate Precision) is Running!"}
 
 # === FITUR 1: PDF KE DOCX ===
 @app.post("/convert/pdf-to-docx")
@@ -106,7 +109,7 @@ def convert_pdf_to_docx(
         logging.error(f"ERROR PDF TO DOCX: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Word: {str(e)}")
 
-# === FITUR 2: PDF KE EXCEL (Full Layout & Dynamic Merge) ===
+# === FITUR 2: PDF KE EXCEL ===
 def is_inside_table(word_bbox, table_bboxes):
     wx0, wtop, wx1, wbottom = word_bbox
     w_mid_x = (wx0 + wx1) / 2
@@ -228,7 +231,6 @@ def convert_pdf_to_excel(
                             current_excel_row = end_row + 1
                     current_excel_row += 2
 
-                # Safe Auto Width
                 if worksheet.max_column:
                     for col_idx in range(1, worksheet.max_column + 1):
                         col_letter = get_column_letter(col_idx)
@@ -248,7 +250,7 @@ def convert_pdf_to_excel(
         logging.error(f"ERROR PDF TO EXCEL: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Gagal convert Excel: {str(e)}")
 
-# === FITUR 3: PDF KE PPTX (High-Fidelity) ===
+# === FITUR 3: PDF KE PPTX (ULTIMATE PRECISION V5) ===
 @app.post("/convert/pdf-to-ppt")
 def convert_pdf_to_ppt(
     background_tasks: BackgroundTasks,
@@ -265,101 +267,135 @@ def convert_pdf_to_ppt(
             shutil.copyfileobj(file.file, buffer)
 
         prs = Presentation()
+        # Set slide size default ke widescreen dulu, nanti diupdate per page jika perlu
+        # Tapi python-pptx set size itu global. Jadi kita ambil size halaman pertama PDF.
         doc = fitz.open(tmp_pdf_path)
+        
+        if len(doc) > 0:
+            p1 = doc[0]
+            # Convert points to EMUs (1 inch = 72 pt = 914400 EMUs)
+            # PyMuPDF: pt. python-pptx: EMU/Inches.
+            # Inches(x) -> x * 914400. 
+            # 1 pt = 1/72 inch.
+            width_pt = p1.rect.width
+            height_pt = p1.rect.height
+            prs.slide_width = int((width_pt / 72) * 914400)
+            prs.slide_height = int((height_pt / 72) * 914400)
 
         for page_index, page in enumerate(doc):
-            # Gunakan layout index 6 (Blank Slide)
-            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide = prs.slides.add_slide(prs.slide_layouts[6]) # Layout 6 = Blank
             
-            # Ambil semua blok (teks dan gambar)
-            blocks = page.get_text("dict")["blocks"]
+            # --- ALGORITMA 1: GAMBAR & VEKTOR (Extract Raw) ---
+            # Kita ambil list gambar dari halaman
+            image_list = page.get_images(full=True)
             
-            for b_index, b in enumerate(blocks):
-                # === TIPE 1: GAMBAR ===
+            # Agar posisi gambar akurat, kita tidak pakai get_images langsung,
+            # tapi via get_text("dict") yang memuat posisi (bbox) gambar.
+            
+            # Gunakan flags lengkap untuk ekstraksi maksimal
+            flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_IMAGES
+            blocks = page.get_text("dict", flags=flags)["blocks"]
+            
+            for b in blocks:
+                # TYPE 1: GAMBAR (RASTER IMAGES)
                 if b['type'] == 1:
-                    # Ekstrak gambar dari blok
                     img_bytes = b["image"]
-                    img_ext = b["ext"]
-                    img_name = f"page{page_index}_img{b_index}.{img_ext}"
-                    img_path = os.path.join(tmp_dir, img_name)
+                    ext = b["ext"]
+                    # Posisi di PDF
+                    x0, y0, x1, y1 = b["bbox"]
                     
+                    # Simpan sementara
+                    img_name = f"p{page_index}_img.{ext}"
+                    img_path = os.path.join(tmp_dir, img_name)
                     with open(img_path, "wb") as f:
                         f.write(img_bytes)
                     
-                    # Posisi Gambar
-                    x0, y0, x1, y1 = b["bbox"]
-                    width = x1 - x0
-                    height = y1 - y0
-                    
-                    # Tambahkan ke Slide
-                    slide.shapes.add_picture(
-                        img_path, 
-                        Inches(x0 / 72), 
-                        Inches(y0 / 72), 
-                        width=Inches(width / 72), 
-                        height=Inches(height / 72)
-                    )
-                
-                # === TIPE 0: TEKS ===
-                elif b['type'] == 0:
-                    # Kita proses per BARIS (Line) agar posisi vertikal akurat
-                    for line in b["lines"]:
-                        x0, y0, x1, y1 = line["bbox"]
-                        w = x1 - x0
-                        h = y1 - y0
-                        
-                        # Buat Text Box sesuai ukuran baris
-                        # Tambah sedikit padding tinggi agar font descender tidak terpotong
-                        txBox = slide.shapes.add_textbox(
-                            Inches(x0 / 72), 
-                            Inches(y0 / 72), 
-                            Inches(w / 72), 
-                            Inches((h+2) / 72)
+                    # Tempel ke PPT
+                    try:
+                        slide.shapes.add_picture(
+                            img_path, 
+                            Inches(x0 / 72), Inches(y0 / 72), 
+                            width=Inches((x1 - x0) / 72), 
+                            height=Inches((y1 - y0) / 72)
                         )
+                    except Exception as img_err:
+                        logging.error(f"Failed adding image: {img_err}")
+
+                # TYPE 0: TEKS (EDITABLE)
+                elif b['type'] == 0:
+                    for line in b["lines"]:
+                        # Kita buat Text Box PER BARIS agar posisi vertikal akurat
+                        # Menggunakan bbox baris, bukan bbox blok
+                        lx0, ly0, lx1, ly1 = line["bbox"]
+                        
+                        # Hitung lebar & tinggi
+                        w = lx1 - lx0
+                        h = ly1 - ly0
+                        
+                        # Buat Text Box
+                        txBox = slide.shapes.add_textbox(
+                            Inches(lx0 / 72), Inches(ly0 / 72), 
+                            Inches(w / 72), Inches(h / 72)
+                        )
+                        
+                        # --- MODIFIKASI KRUSIAL UNTUK "RAPI" ---
                         tf = txBox.text_frame
-                        tf.word_wrap = False # Mencegah wrap otomatis yang merusak layout
-                        tf.margin_top = 0
-                        tf.margin_bottom = 0
+                        tf.word_wrap = False  # Matikan word wrap agar tidak turun baris sendiri
+                        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT # Sesuaikan box dengan teks
+                        
+                        # SET MARGIN 0 (Kunci agar teks tidak bergeser)
                         tf.margin_left = 0
                         tf.margin_right = 0
+                        tf.margin_top = 0
+                        tf.margin_bottom = 0
+                        tf.vertical_anchor = MSO_ANCHOR.TOP # Anchor ke atas
                         
                         p = tf.paragraphs[0]
                         
                         # Isi teks per kata/style (Span)
                         for span in line["spans"]:
                             text = span["text"]
-                            # Skip jika teks kosong
-                            if not text: continue
-                                
+                            # Filter karakter aneh
+                            if not text.strip(): 
+                                if text == " ": pass # keep spaces
+                                else: continue
+
                             run = p.add_run()
                             run.text = text
                             
-                            # 1. Ukuran Font
+                            # 1. Font Size
                             run.font.size = Pt(span["size"])
                             
-                            # 2. Warna Teks (sRGB Integer ke RGB)
-                            # PyMuPDF color is usually sRGB integer
+                            # 2. Font Name (Optional, fallback ke default PPT jika font PDF aneh)
+                            # run.font.name = span["font"] 
+                            
+                            # 3. Warna (Color)
                             try:
                                 c = span["color"]
+                                # PyMuPDF sRGB integer conversion
                                 r = (c >> 16) & 0xFF
                                 g = (c >> 8) & 0xFF
                                 b = c & 0xFF
                                 run.font.color.rgb = RGBColor(r, g, b)
                             except:
-                                pass # Gunakan default hitam jika gagal
+                                run.font.color.rgb = RGBColor(0, 0, 0) # Default Hitam
                             
-                            # 3. Style Bold / Italic (Flags)
-                            # bit 0: superscript, 1: italic, 2: serif, 3: mono, 4: bold
-                            flags = span["flags"]
-                            if flags & 2**4:
+                            # 4. Styling (Bold/Italic)
+                            flags_font = span["flags"]
+                            # Cek dokumentasi PyMuPDF flags: 2^4 = Bold, 2^1 = Italic
+                            if flags_font & 16:
                                 run.font.bold = True
-                            if flags & 2**1:
+                            if flags_font & 2:
                                 run.font.italic = True
 
         doc.close()
         prs.save(tmp_ppt_path)
         background_tasks.add_task(cleanup_folder, tmp_dir)
-        return FileResponse(path=tmp_ppt_path, filename=ppt_filename, media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation')
+        return FileResponse(
+            path=tmp_ppt_path, 
+            filename=ppt_filename, 
+            media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        )
 
     except Exception as e:
         cleanup_folder(tmp_dir)
